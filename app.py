@@ -3,14 +3,14 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import pdfplumber
-import io
+import random
 from typing import Tuple, List, Dict
 
 # ----------------------------------------------------------------------------
 # 1. CONFIGURAÇÃO E ESTILO
 # ----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Panificadora ProfitOS 2.0",
+    page_title="Panificadora ProfitOS 3.0",
     layout="wide",
     initial_sidebar_state="expanded",
     page_icon="🍞"
@@ -19,91 +19,83 @@ st.set_page_config(
 st.markdown("""
 <style>
     div[data-testid="stMetric"] {
-        background-color: #f0f2f6;
-        border: 1px solid #dcdcdc;
-        padding: 10px;
-        border-radius: 8px;
+        background-color: #ffffff;
+        border: 1px solid #e0e0e0;
+        padding: 15px;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
     [data-testid="stSidebar"] { background-color: #f8f9fa; }
-    h1, h2 { color: #2c3e50; }
+    h1, h2, h3 { color: #2c3e50; }
+    .stButton>button { width: 100%; border-radius: 6px; }
     .stDataFrame { border: 1px solid #ddd; border-radius: 5px; }
+    
+    /* Destaque para cards de lucro */
+    div[data-testid="metric-container"] {
+        align-items: center;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # ----------------------------------------------------------------------------
-# 2. INTEELIGÊNCIA DE DADOS & FUNÇÕES
+# 2. FUNÇÕES DE LÓGICA E DADOS
 # ----------------------------------------------------------------------------
 
-def authenticate(username, password, role):
-    # Em produção, usar hash seguro
-    users = {
-        "master": ("admin123", "master"),
-        "socia": ("socia123", "master"),
-        "gerente": ("gerente123", "gerente"),
-        "vendedor": ("venda1", "vendedor"),
-    }
-    cred = users.get(username)
-    if cred and cred[0] == password:
-        # Permite acesso se a role for compativel ou se for master acessando outros
-        if cred[1] == "master" or cred[1] == role:
-            return True
-    return False
+def init_session():
+    # Inicializa banco de dados de usuários se não existir
+    if 'users_db' not in st.session_state:
+        st.session_state.users_db = {
+            "master": {"pass": "admin123", "role": "master", "name": "Diretor"},
+            "gerente": {"pass": "gerente123", "role": "gerente", "name": "Gerente Loja"},
+            "vendedor": {"pass": "venda1", "role": "vendedor", "name": "Balconista 1"}
+        }
+    
+    # Inicializa dados financeiros
+    if 'data_base' not in st.session_state:
+        st.session_state.data_base = pd.DataFrame(columns=[
+            'produto', 'custo', 'preco_venda', 'quantidade', 'faturamento'
+        ])
+    
+    # Parâmetros financeiros globais
+    if 'fin_params' not in st.session_state:
+        st.session_state.fin_params = {
+            'custo_fixo': 5000.0, 
+            'desperdicio': 200.0,
+            'imposto': 6.0, # Simples
+            'taxa_cartao': 3.5,
+            'comissao': 0.0
+        }
+
+def authenticate(username, password):
+    users = st.session_state.users_db
+    if username in users:
+        if users[username]['pass'] == password:
+            return users[username]
+    return None
 
 def normalizar_colunas(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    IA Lógica: Mapeia nomes variados de colunas para o padrão do sistema.
-    """
-    # Remove espaços e joga pra minusculo
     df.columns = [str(c).strip().lower() for c in df.columns]
-    
-    # Dicionário de Sinônimos (O sistema entende essas variações)
     mapa = {
         'produto': ['nome', 'descrição', 'item', 'mercadoria', 'produto'],
         'quantidade': ['qtd', 'quant', 'quantidade', 'volume', 'unidades'],
         'custo': ['custo', 'custo unit', 'vl custo', 'preço de custo', 'custo_unitario'],
-        'preco_venda': ['venda', 'preço venda', 'vl venda', 'preço de venda', 'preco medio', 'preço médio r$'],
-        'faturamento': ['total', 'faturamento', 'total r$', 'valor total'],
-        'percentual': ['%', 'perc', 'part', 'participacao'],
-        'acumulado': ['acum', 'acumulado', '% acum']
+        'preco_venda': ['venda', 'preço venda', 'vl venda', 'preço de venda', 'preco medio'],
+        'faturamento': ['total', 'faturamento', 'total r$', 'valor total']
     }
-    
     rename_dict = {}
     for padrao, variacoes in mapa.items():
         for col in df.columns:
-            # Verifica correspondência exata ou parcial
             if col in variacoes or any(v in col for v in variacoes if len(v) > 3):
                 rename_dict[col] = padrao
-                break # Para ao encontrar a primeira correspondencia para evitar duplicidade
-    
+                break
     df = df.rename(columns=rename_dict)
     
-    # Garante colunas mínimas se não existirem
-    required = ['produto', 'quantidade', 'custo', 'preco_venda']
-    for req in required:
-        if req not in df.columns:
-            if req == 'custo': df[req] = 0.0
-            elif req == 'quantidade': df[req] = 0.0
-            elif req == 'preco_venda': df[req] = 0.0
-            else: df[req] = "Produto Desconhecido"
+    # Colunas obrigatórias
+    req = ['produto', 'quantidade', 'custo', 'preco_venda']
+    for r in req:
+        if r not in df.columns: df[r] = 0.0 if r != 'produto' else 'Item Desconhecido'
             
     return df
-
-def extrair_pdf(file) -> pd.DataFrame:
-    """
-    Tenta extrair tabelas de um PDF usando pdfplumber.
-    """
-    all_data = []
-    with pdfplumber.open(file) as pdf:
-        for page in pdf.pages:
-            # Tenta extrair tabela
-            table = page.extract_table()
-            if table:
-                df_page = pd.DataFrame(table[1:], columns=table[0])
-                all_data.append(df_page)
-    
-    if all_data:
-        return pd.concat(all_data, ignore_index=True)
-    return pd.DataFrame()
 
 def processar_upload(file):
     try:
@@ -112,258 +104,355 @@ def processar_upload(file):
         elif file.name.endswith(('.xls', '.xlsx')):
             df = pd.read_excel(file)
         elif file.name.endswith('.pdf'):
-            df = extrair_pdf(file)
+            with pdfplumber.open(file) as pdf:
+                data = []
+                for page in pdf.pages:
+                    tbl = page.extract_table()
+                    if tbl: data.extend(tbl[1:])
+                df = pd.DataFrame(data)
         else:
-            return None, "Formato não suportado."
-        
-        # Limpeza Numérica (Converter '1.200,50' para float)
+            return None, "Formato inválido"
+            
         df = normalizar_colunas(df)
         cols_num = ['custo', 'preco_venda', 'quantidade', 'faturamento']
-        for col in cols_num:
-            if col in df.columns:
-                if df[col].dtype == 'object':
-                    df[col] = df[col].astype(str).str.replace('R$', '').str.replace('.', '').str.replace(',', '.')
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-                
+        for c in cols_num:
+            if c in df.columns:
+                if df[c].dtype == 'object':
+                    df[c] = df[c].astype(str).str.replace('R$', '').str.replace('.', '').str.replace(',', '.')
+                df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
         return df, None
     except Exception as e:
         return None, str(e)
 
-def analisar_menu(df: pd.DataFrame) -> pd.DataFrame:
+def analisar_dados(df):
     df = df.copy()
-    # Recalcula campos calculados se faltarem
     if 'faturamento' not in df.columns or df['faturamento'].sum() == 0:
         df['faturamento'] = df['quantidade'] * df['preco_venda']
-        
-    df['lucro'] = df['faturamento'] - (df['quantidade'] * df['custo'])
-    df['margem_perc'] = df['lucro'] / df['faturamento'].replace(0, np.nan)
-
+    
     # Curva ABC
-    df = df.sort_values(by='faturamento', ascending=False)
-    df['acumulado_calc'] = df['faturamento'].cumsum() / df['faturamento'].sum()
+    df = df.sort_values('faturamento', ascending=False)
+    df['acumulado'] = df['faturamento'].cumsum() / df['faturamento'].sum()
+    df['classe_abc'] = np.where(df['acumulado'] <= 0.8, 'A', np.where(df['acumulado'] <= 0.95, 'B', 'C'))
     
-    # Classificação ABC
-    conditions = [df['acumulado_calc'] <= 0.80, df['acumulado_calc'] <= 0.95]
-    choices = ['A', 'B']
-    df['classe_abc'] = np.select(conditions, choices, default='C')
-    
-    # Classificação BCG (Margem vs Volume)
-    mediana_margem = df['margem_perc'].median()
-    df['alta_margem'] = df['margem_perc'] >= mediana_margem
-    
-    bcg = []
-    for _, row in df.iterrows():
-        eh_popular = row['classe_abc'] in ['A', 'B'] # Alto Volume/Fat
-        tem_margem = row['alta_margem']
-        
-        if eh_popular and tem_margem: bcg.append('🌟 Estrela')
-        elif eh_popular and not tem_margem: bcg.append('🐮 Burro de Carga')
-        elif not eh_popular and tem_margem: bcg.append('🧩 Quebra-Cabeça')
-        else: bcg.append('🐕 Cão')
-    df['categoria_bcg'] = bcg
+    # Margem Bruta Individual
+    df['lucro_bruto'] = df['faturamento'] - (df['quantidade'] * df['custo'])
+    df['margem_perc'] = df['lucro_bruto'] / df['faturamento'].replace(0, np.nan)
     
     return df
 
+def gerar_combos_ia(df, num_sugestoes=5):
+    """Gera combos inteligentes baseados em regras de negócio"""
+    if df.empty: return []
+    
+    df = analisar_dados(df)
+    estrelas = df[(df['classe_abc'].isin(['A', 'B'])) & (df['margem_perc'] > 0.4)]
+    burros = df[(df['classe_abc'].isin(['A', 'B'])) & (df['margem_perc'] <= 0.4)]
+    quebras = df[(df['classe_abc'] == 'C') & (df['margem_perc'] > 0.5)]
+    
+    sugestoes = []
+    
+    # Estratégias
+    estrategias = [
+        ("Aumentar Ticket Médio", burros, quebras, 0.10),
+        ("Giro de Estoque", estrelas, quebras, 0.15),
+        ("Café da Manhã Completo", burros, estrelas, 0.05),
+        ("Oferta Irresistível", burros, burros, 0.08),
+        ("Experiência Premium", estrelas, estrelas, 0.12)
+    ]
+    
+    # Randomiza para gerar "novas ideias"
+    random.shuffle(estrategias)
+    
+    count = 0
+    for nome_estrat, df1, df2, desconto_padrao in estrategias:
+        if not df1.empty and not df2.empty:
+            # Pega produtos aleatórios dentro dos filtros para variar
+            p1 = df1.sample(1).iloc[0]
+            # Tenta pegar um p2 diferente de p1
+            df2_filt = df2[df2['produto'] != p1['produto']]
+            if not df2_filt.empty:
+                p2 = df2_filt.sample(1).iloc[0]
+                
+                custo_tot = p1['custo'] + p2['custo']
+                venda_full = p1['preco_venda'] + p2['preco_venda']
+                venda_promo = venda_full * (1 - desconto_padrao)
+                lucro = venda_promo - custo_tot
+                margem = (lucro / venda_promo) * 100 if venda_promo > 0 else 0
+                
+                sugestoes.append({
+                    "titulo": f"{nome_estrat}",
+                    "prod1": p1['produto'],
+                    "prod2": p2['produto'],
+                    "venda_full": venda_full,
+                    "venda_promo": venda_promo,
+                    "margem": margem,
+                    "racional": f"Une '{p1['produto']}' (Volume) com '{p2['produto']}' (Margem/Giro).",
+                    "desconto": desconto_padrao * 100
+                })
+                count += 1
+                if count >= num_sugestoes: break
+                
+    return sugestoes
+
 # ----------------------------------------------------------------------------
-# 3. INTERFACE
+# 3. INTERFACE PRINCIPAL
 # ----------------------------------------------------------------------------
 
 def main():
-    # Inicializa sessão
-    if 'data_base' not in st.session_state:
-        # Estrutura base vazia
-        st.session_state.data_base = pd.DataFrame(columns=[
-            'produto', 'custo', 'preco_venda', 'quantidade', 'faturamento', 'classe_abc'
-        ])
-    if 'dna_params' not in st.session_state:
-        st.session_state.dna_params = {'dna': 0.0, 'custo_fixo': 0.0, 'faturamento': 1.0}
-    if 'logged_in' not in st.session_state:
-        st.session_state.logged_in = False
-
-    # --- LOGIN ---
-    if not st.session_state.logged_in:
-        c1, c2, c3 = st.columns([1,2,1])
+    init_session()
+    
+    # --- TELA DE LOGIN ---
+    if 'logged_in' not in st.session_state or not st.session_state.logged_in:
+        c1, c2, c3 = st.columns([1,1.5,1])
         with c2:
-            st.title("🍞 ProfitOS 2.0")
-            with st.form("login"):
+            st.title("🍞 ProfitOS Login")
+            st.markdown("---")
+            with st.form("login_form"):
                 u = st.text_input("Usuário")
                 p = st.text_input("Senha", type="password")
-                r = st.selectbox("Perfil", ["master", "gerente", "vendedor"])
-                if st.form_submit_button("Entrar"):
-                    if authenticate(u, p, r):
+                
+                if st.form_submit_button("Acessar Sistema"):
+                    user_data = authenticate(u, p)
+                    if user_data:
                         st.session_state.logged_in = True
-                        st.session_state.user = u
-                        st.session_state.role = r
+                        st.session_state.user_info = user_data
+                        st.session_state.username = u
                         st.rerun()
                     else:
-                        st.error("Dados inválidos")
+                        st.error("Usuário ou senha incorretos.")
         return
 
-    # --- SIDEBAR ---
-    role = st.session_state.role
-    st.sidebar.title("🍞 Menu")
-    st.sidebar.caption(f"Logado: {st.session_state.user} ({role})")
+    # --- USUÁRIO LOGADO ---
+    user = st.session_state.user_info
+    role = user['role']
+    name = user['name']
     
-    opts = ["Central de Dados", "Dashboard Inteligente", "Precificador", "Combos IA"]
-    if role == "vendedor": opts = ["Precificador"]
+    # SIDEBAR
+    st.sidebar.title("🍞 Menu ProfitOS")
+    st.sidebar.write(f"Olá, **{name}**")
+    st.sidebar.caption(f"Perfil: {role.upper()}")
     
-    nav = st.sidebar.radio("Navegação", opts)
+    # Definição de Menus por Perfil
+    menu_options = ["Central de Dados", "Precificador", "Dashboard Inteligente", "Combos IA"]
+    if role == "vendedor":
+        menu_options = ["Precificador"]
+    if role == "master":
+        menu_options.append("Gestão de Usuários")
+        
+    choice = st.sidebar.radio("Navegar", menu_options)
     
+    st.sidebar.markdown("---")
     if st.sidebar.button("Sair"):
         st.session_state.logged_in = False
         st.rerun()
 
-    # --- PÁGINA 1: CENTRAL DE DADOS (IMPORTAÇÃO + MANUAL) ---
-    if nav == "Central de Dados":
-        st.title("📂 Central de Dados & Produtos")
-        st.markdown("Aqui você alimenta a Inteligência do sistema. Importe arquivos ou cadastre manualmente.")
+    # --- 1. GESTÃO DE USUÁRIOS (MASTER) ---
+    if choice == "Gestão de Usuários":
+        st.title("👥 Gestão de Acessos")
         
-        with st.expander("ℹ️ Ver Modelo de Importação Ideal (Margem de Flexibilidade)", expanded=False):
-            st.info("""
-            **O sistema usa IA para tentar ler qualquer formato**, mas este é o ideal para garantir 100% de precisão:
-            
-            | Produto | Quantidade | Custo Unit | Preço Venda | Faturamento | % | Acumulado |
-            | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-            | Pão Francês | 1000 | 0.30 | 0.90 | 900.00 | 5% | 5% |
-            
-            *Formatos aceitos:* .xlsx (Excel), .csv (Texto), .pdf (Relatórios do Sistema)
-            """)
-
-        tab_imp, tab_man = st.tabs(["📤 Importar Arquivo", "📝 Cadastro Manual / Edição"])
+        tab_list, tab_add = st.tabs(["Lista de Usuários", "Criar Novo Usuário"])
         
-        with tab_imp:
-            file = st.file_uploader("Arraste seu relatório (ABC, Vendas, Custos)", type=['csv', 'xlsx', 'pdf'])
-            if file:
-                df_new, err = processar_upload(file)
-                if err:
-                    st.error(f"Erro na leitura: {err}")
+        with tab_list:
+            # Converte dict para df para exibir
+            users_list = []
+            for u_key, u_val in st.session_state.users_db.items():
+                users_list.append({"Login": u_key, "Nome": u_val['name'], "Perfil": u_val['role']})
+            st.dataframe(pd.DataFrame(users_list), use_container_width=True)
+            
+            st.subheader("Alterar/Remover")
+            c1, c2, c3 = st.columns(3)
+            user_to_edit = c1.selectbox("Selecionar Usuário", list(st.session_state.users_db.keys()))
+            new_pass = c2.text_input("Nova Senha (deixe vazio para manter)", type="password")
+            
+            if c3.button("Atualizar Senha"):
+                if new_pass:
+                    st.session_state.users_db[user_to_edit]['pass'] = new_pass
+                    st.success("Senha atualizada!")
+            
+            if st.button("🗑️ Excluir Usuário", type="primary"):
+                if user_to_edit == st.session_state.username:
+                    st.error("Você não pode excluir a si mesmo.")
                 else:
-                    st.success(f"Arquivo lido com sucesso! {len(df_new)} linhas identificadas.")
-                    st.dataframe(df_new.head())
-                    
-                    if st.button("Confirmar e Carregar para Análise"):
-                        st.session_state.data_base = df_new
-                        st.success("Dados carregados para o sistema! Vá para o Dashboard.")
+                    del st.session_state.users_db[user_to_edit]
+                    st.success(f"Usuário {user_to_edit} removido.")
+                    st.rerun()
 
-        with tab_man:
-            st.markdown("Use a tabela abaixo para **cadastrar produtos novos** ou **corrigir** dados importados.")
-            
-            # Editor de Dados
-            edited_df = st.data_editor(
-                st.session_state.data_base,
-                num_rows="dynamic",
-                column_config={
-                    "custo": st.column_config.NumberColumn("Custo (R$)", format="%.2f"),
-                    "preco_venda": st.column_config.NumberColumn("Venda (R$)", format="%.2f"),
-                    "faturamento": st.column_config.NumberColumn("Faturamento (R$)", format="%.2f"),
-                },
-                use_container_width=True
-            )
-            
-            if st.button("Salvar Alterações Manuais"):
-                st.session_state.data_base = edited_df
-                st.success("Base de dados atualizada!")
+        with tab_add:
+            with st.form("add_user"):
+                new_login = st.text_input("Login")
+                new_name = st.text_input("Nome Completo")
+                new_role = st.selectbox("Perfil", ["master", "gerente", "vendedor"])
+                new_p = st.text_input("Senha Inicial", type="password")
+                
+                if st.form_submit_button("Criar Usuário"):
+                    if new_login in st.session_state.users_db:
+                        st.error("Login já existe.")
+                    elif new_login and new_p:
+                        st.session_state.users_db[new_login] = {
+                            "pass": new_p, "role": new_role, "name": new_name
+                        }
+                        st.success("Usuário criado com sucesso!")
+                    else:
+                        st.error("Preencha todos os campos.")
 
-    # --- PÁGINA 2: DASHBOARD ---
-    elif nav == "Dashboard Inteligente":
-        st.title("📊 Análise 360º")
+    # --- 2. CENTRAL DE DADOS ---
+    elif choice == "Central de Dados":
+        st.title("📂 Importação de Dados")
+        
+        uploaded = st.file_uploader("Upload (XLSX, CSV, PDF)", type=['csv','xlsx','pdf'])
+        if uploaded:
+            df, err = processar_upload(uploaded)
+            if err:
+                st.error(err)
+            else:
+                st.success(f"Lido com sucesso: {len(df)} itens.")
+                if st.button("💾 Salvar na Base de Dados"):
+                    st.session_state.data_base = df
+                    st.success("Dados atualizados!")
+        
+        st.subheader("Base Atual")
+        st.data_editor(st.session_state.data_base, num_rows="dynamic", use_container_width=True)
+
+    # --- 3. PRECIFICADOR ---
+    elif choice == "Precificador":
+        st.title("🏷️ Precificador Rápido")
         
         df = st.session_state.data_base
+        produtos_lista = df['produto'].unique().tolist() if not df.empty else []
+        produtos_lista.insert(0, "Novo Produto (Digitar manual)")
         
-        if df.empty or 'produto' not in df.columns:
-            st.warning("⚠️ Nenhum dado carregado. Vá em 'Central de Dados' e importe um arquivo ou cadastre produtos.")
-        else:
-            # Processa Análise
-            df_analise = analisar_menu(df)
+        c1, c2 = st.columns(2)
+        with c1:
+            sel_prod = st.selectbox("Selecione um Produto", produtos_lista)
             
-            # KPI
+            custo_base = 0.0
+            if sel_prod != "Novo Produto (Digitar manual)":
+                custo_base = float(df[df['produto'] == sel_prod]['custo'].iloc[0])
+                st.caption(f"Custo Base importado: R$ {custo_base:.2f}")
+            
+            custo_final = st.number_input("Custo Insumos (R$)", value=custo_base, format="%.2f")
+            embalagem = st.number_input("Custo Embalagem (R$)", 0.0, format="%.2f")
+            cupom = st.number_input("Cupom de Desconto (R$)", 0.0, format="%.2f")
+            
+        with c2:
+            st.markdown("### Definição de Lucro")
+            # Puxa DNA da config global
+            dna_params = st.session_state.fin_params
+            taxas_totais = dna_params['imposto'] + dna_params['taxa_cartao'] + dna_params['comissao']
+            
+            margem_target = st.slider("Margem de Lucro Líquido Desejada (%)", 0, 100, 20)
+            
+            # Cálculo
+            # Preço = (Custo + Emb + Cupom) / (1 - (Taxas + Margem))
+            custo_total = custo_final + embalagem
+            divisor = 1 - (taxas_totais/100) - (margem_target/100)
+            
+            st.divider()
+            
+            if divisor <= 0:
+                st.error("A soma de Taxas + Margem ultrapassa 100%. Impossível calcular.")
+            else:
+                preco_venda = (custo_total + cupom) / divisor
+                st.metric("Preço de Venda Sugerido", f"R$ {preco_venda:.2f}")
+                
+                detalhe = {
+                    "Custo Prod+Emb": custo_total,
+                    "Cupom (Cliente ganha)": cupom,
+                    f"Impostos/Taxas ({taxas_totais}%)": preco_venda * (taxas_totais/100),
+                    f"Lucro Líquido ({margem_target}%)": preco_venda * (margem_target/100)
+                }
+                st.bar_chart(pd.Series(detalhe))
+
+    # --- 4. DASHBOARD INTELIGENTE ---
+    elif choice == "Dashboard Inteligente":
+        st.title("📊 Painel Financeiro Real")
+        
+        # Configuração de Custos (Sidebar interna ou Expander)
+        with st.expander("⚙️ Configurar Parâmetros de Custo do Mês", expanded=False):
+            c_a, c_b, c_c = st.columns(3)
+            fp = st.session_state.fin_params
+            
+            n_cf = c_a.number_input("Custo Fixo (Aluguel, Luz, Pessoal)", value=fp['custo_fixo'])
+            n_desp = c_b.number_input("Desperdício/Perda (R$)", value=fp['desperdicio'])
+            n_imp = c_c.number_input("Impostos + Taxas Totais (%)", value=fp['imposto'] + fp['taxa_cartao'])
+            
+            if st.button("Salvar Parâmetros"):
+                st.session_state.fin_params.update({
+                    'custo_fixo': n_cf, 'desperdicio': n_desp, 'imposto': n_imp, 'taxa_cartao': 0
+                })
+                st.success("Parâmetros atualizados!")
+                st.rerun()
+
+        df = st.session_state.data_base
+        if df.empty:
+            st.warning("Sem dados para analisar.")
+        else:
+            df = analisar_dados(df)
+            
+            # CÁLCULO DE LUCRO LÍQUIDO REAL
+            faturamento_total = df['faturamento'].sum()
+            custo_produtos = (df['quantidade'] * df['custo']).sum()
+            lucro_bruto = faturamento_total - custo_produtos
+            
+            fp = st.session_state.fin_params
+            impostos_valor = faturamento_total * (fp['imposto'] / 100) # Assumindo que 'imposto' aqui já soma taxas
+            despesas_operacionais = fp['custo_fixo'] + fp['desperdicio']
+            
+            lucro_liquido = lucro_bruto - impostos_valor - despesas_operacionais
+            margem_liq_real = (lucro_liquido / faturamento_total * 100) if faturamento_total > 0 else 0
+            
+            # CARDS
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Faturamento Analisado", f"R$ {df_analise['faturamento'].sum():,.2f}")
-            k2.metric("Lucro Estimado", f"R$ {df_analise['lucro'].sum():,.2f}")
-            k3.metric("Margem Média", f"{df_analise['margem_perc'].mean()*100:.1f}%")
-            k4.metric("Total Produtos", len(df_analise))
+            k1.metric("Faturamento", f"R$ {faturamento_total:,.2f}")
+            k2.metric("CMV (Custo Mercadoria)", f"R$ {custo_produtos:,.2f}", f"-{(custo_produtos/faturamento_total)*100:.1f}% Fat")
+            k3.metric("Custos Fixos + Desperdício", f"R$ {despesas_operacionais:,.2f}", help=f"CF: {fp['custo_fixo']} + Perda: {fp['desperdicio']}")
+            k4.metric("Lucro Líquido Real", f"R$ {lucro_liquido:,.2f}", f"{margem_liq_real:.1f}%", delta_color="normal")
+            
+            st.markdown("---")
             
             # Gráficos
-            c1, c2 = st.columns(2)
-            with c1:
-                st.subheader("Curva ABC (Pareto)")
-                fig_abc = px.bar(df_analise.head(20), x='produto', y='faturamento', color='classe_abc', title="Top 20 Produtos")
-                st.plotly_chart(fig_abc, use_container_width=True)
-            
-            with c2:
-                st.subheader("Matriz de Lucratividade")
-                fig_bcg = px.scatter(df_analise, x='margem_perc', y='faturamento', color='categoria_bcg',
-                                     hover_name='produto', size='quantidade', title="Volume vs Margem")
-                # Adiciona linhas de corte
-                fig_bcg.add_hline(y=df_analise['faturamento'].mean(), line_dash="dash", annotation_text="Média Fat.")
-                fig_bcg.add_vline(x=df_analise['margem_perc'].median(), line_dash="dash", annotation_text="Mediana Margem")
-                st.plotly_chart(fig_bcg, use_container_width=True)
-            
-            st.dataframe(df_analise)
+            g1, g2 = st.columns([2,1])
+            with g1:
+                st.subheader("Curva ABC de Vendas")
+                fig = px.bar(df.head(15), x='produto', y='faturamento', color='classe_abc', title="Top 15 Produtos")
+                st.plotly_chart(fig, use_container_width=True)
+            with g2:
+                st.subheader("Para onde vai o dinheiro?")
+                waterfall_data = {
+                    "Faturamento": faturamento_total,
+                    "(-) CMV": -custo_produtos,
+                    "(-) Impostos": -impostos_valor,
+                    "(-) Fixos/Perdas": -despesas_operacionais,
+                    "(=) Lucro Líquido": lucro_liquido
+                }
+                fig_w = go.Figure(go.Waterfall(
+                    measure = ["absolute", "relative", "relative", "relative", "total"],
+                    x = list(waterfall_data.keys()),
+                    y = list(waterfall_data.values()),
+                    connector = {"line":{"color":"rgb(63, 63, 63)"}},
+                ))
+                st.plotly_chart(fig_w, use_container_width=True)
 
-    # --- PÁGINA 3: PRECIFICADOR ---
-    elif nav == "Precificador":
-        st.title("🏷️ Precificador Mestre")
+    # --- 5. COMBOS IA ---
+    elif choice == "Combos IA":
+        st.title("🤖 Fábrica de Combos")
         
-        # Area de configuração rapida de DNA
-        if role == 'master':
-            with st.expander("⚙️ Configurar DNA (Custos da Empresa)"):
-                cf = st.number_input("Custo Fixo", value=st.session_state.dna_params.get('custo_fixo', 0.0))
-                fat = st.number_input("Faturamento Médio", value=st.session_state.dna_params.get('faturamento', 1.0))
-                taxas = st.number_input("Taxas + Impostos (%)", value=10.0)
-                
-                if st.button("Atualizar DNA"):
-                    dna = (cf/fat) + (taxas/100)
-                    st.session_state.dna_params = {'dna': dna, 'custo_fixo': cf, 'faturamento': fat}
-                    st.success(f"DNA: {dna*100:.2f}%")
+        tab_manual, tab_ia = st.tabs(["🛠️ Criar Manualmente", "✨ Sugestões IA"])
         
-        dna = st.session_state.dna_params.get('dna', 0.0)
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("Composição")
-            custo = st.number_input("Custo Insumos (R$)", 0.0)
-            margem = st.slider("Margem Desejada (%)", 0, 100, 25) / 100
-        
-        with col2:
-            st.subheader("Resultado")
-            divisor = 1 - dna - margem
-            if divisor <= 0:
-                st.error("Margem + Custos estouram 100%. Impossível precificar.")
-            else:
-                preco = custo / divisor
-                st.metric("Preço Sugerido", f"R$ {preco:.2f}")
-                st.write(f"Custo: {custo} | DNA: {dna*100:.1f}% | Lucro: {margem*100:.0f}%")
-
-    # --- PÁGINA 4: COMBOS IA ---
-    elif nav == "Combos IA":
-        st.title("🤖 Sugestão de Combos")
         df = st.session_state.data_base
         
-        if df.empty:
-            st.warning("Carregue dados na Central de Dados primeiro.")
-        else:
-            df = analisar_menu(df)
-            burros = df[df['categoria_bcg'] == '🐮 Burro de Carga']
-            quebras = df[df['categoria_bcg'] == '🧩 Quebra-Cabeça']
-            
-            if not burros.empty and not quebras.empty:
-                st.success("IA encontrou oportunidades de combinação!")
-                
-                b_prod = burros.iloc[0]
-                q_prod = quebras.iloc[0]
-                
-                total = b_prod['preco_venda'] + q_prod['preco_venda']
-                desc = total * 0.90
-                
-                st.metric("Combo Sugerido", f"{b_prod['produto']} + {q_prod['produto']}")
-                c1, c2 = st.columns(2)
-                c1.metric("Preço Original", f"R$ {total:.2f}")
-                c2.metric("Preço Combo (10% off)", f"R$ {desc:.2f}")
-                
-                st.info(f"Estratégia: Usar o alto volume de vendas do '{b_prod['produto']}' para impulsionar a venda do '{q_prod['produto']}' que tem alta margem.")
+        with tab_manual:
+            if df.empty:
+                st.warning("Carregue produtos primeiro.")
             else:
-                st.info("Ainda não há dados suficientes classificados como Burro de Carga e Quebra-Cabeça para sugerir combos.")
-
-if __name__ == "__main__":
-    main()
+                prods = st.multiselect("Selecione os Produtos do Combo", df['produto'].unique())
+                
+                if prods:
+                    # Filtra e soma
+                    selecao = df[df['produto'].isin(prods)]
+                    custo_total = selecao['custo'].sum()
+                    venda_soma = selecao['preco_venda'].sum()
+                    
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Preço Tabela (Soma)", f"R$ {venda_soma:.2f}")
+                    c2.metric("Custo Itens", f"R$ {cust
