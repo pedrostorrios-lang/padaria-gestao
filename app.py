@@ -2,9 +2,9 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
 import pdfplumber
 import random
-from typing import Tuple, List, Dict
 
 # ----------------------------------------------------------------------------
 # 1. CONFIGURAÇÃO E ESTILO
@@ -29,11 +29,6 @@ st.markdown("""
     h1, h2, h3 { color: #2c3e50; }
     .stButton>button { width: 100%; border-radius: 6px; }
     .stDataFrame { border: 1px solid #ddd; border-radius: 5px; }
-    
-    /* Destaque para cards de lucro */
-    div[data-testid="metric-container"] {
-        align-items: center;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -164,33 +159,38 @@ def gerar_combos_ia(df, num_sugestoes=5):
     random.shuffle(estrategias)
     
     count = 0
-    for nome_estrat, df1, df2, desconto_padrao in estrategias:
-        if not df1.empty and not df2.empty:
-            # Pega produtos aleatórios dentro dos filtros para variar
-            p1 = df1.sample(1).iloc[0]
-            # Tenta pegar um p2 diferente de p1
-            df2_filt = df2[df2['produto'] != p1['produto']]
-            if not df2_filt.empty:
-                p2 = df2_filt.sample(1).iloc[0]
-                
-                custo_tot = p1['custo'] + p2['custo']
-                venda_full = p1['preco_venda'] + p2['preco_venda']
-                venda_promo = venda_full * (1 - desconto_padrao)
-                lucro = venda_promo - custo_tot
-                margem = (lucro / venda_promo) * 100 if venda_promo > 0 else 0
-                
-                sugestoes.append({
-                    "titulo": f"{nome_estrat}",
-                    "prod1": p1['produto'],
-                    "prod2": p2['produto'],
-                    "venda_full": venda_full,
-                    "venda_promo": venda_promo,
-                    "margem": margem,
-                    "racional": f"Une '{p1['produto']}' (Volume) com '{p2['produto']}' (Margem/Giro).",
-                    "desconto": desconto_padrao * 100
-                })
-                count += 1
-                if count >= num_sugestoes: break
+    # Tenta gerar combos iterando pelas estratégias
+    while count < num_sugestoes:
+        for nome_estrat, df1, df2, desconto_padrao in estrategias:
+            if not df1.empty and not df2.empty:
+                try:
+                    p1 = df1.sample(1).iloc[0]
+                    df2_filt = df2[df2['produto'] != p1['produto']]
+                    if not df2_filt.empty:
+                        p2 = df2_filt.sample(1).iloc[0]
+                        
+                        custo_tot = p1['custo'] + p2['custo']
+                        venda_full = p1['preco_venda'] + p2['preco_venda']
+                        venda_promo = venda_full * (1 - desconto_padrao)
+                        lucro = venda_promo - custo_tot
+                        margem = (lucro / venda_promo) * 100 if venda_promo > 0 else 0
+                        
+                        sugestoes.append({
+                            "titulo": f"{nome_estrat}",
+                            "prod1": p1['produto'],
+                            "prod2": p2['produto'],
+                            "venda_full": venda_full,
+                            "venda_promo": venda_promo,
+                            "margem": margem,
+                            "racional": f"Une '{p1['produto']}' (Volume) com '{p2['produto']}' (Margem/Giro).",
+                            "desconto": desconto_padrao * 100
+                        })
+                        count += 1
+                        if count >= num_sugestoes: break
+                except:
+                    continue
+            if count >= num_sugestoes: break
+        if count == 0: break # Evita loop infinito se não houver dados
                 
     return sugestoes
 
@@ -210,6 +210,7 @@ def main():
             with st.form("login_form"):
                 u = st.text_input("Usuário")
                 p = st.text_input("Senha", type="password")
+                # Sem seletor de perfil, define auto
                 
                 if st.form_submit_button("Acessar Sistema"):
                     user_data = authenticate(u, p)
@@ -253,7 +254,6 @@ def main():
         tab_list, tab_add = st.tabs(["Lista de Usuários", "Criar Novo Usuário"])
         
         with tab_list:
-            # Converte dict para df para exibir
             users_list = []
             for u_key, u_val in st.session_state.users_db.items():
                 users_list.append({"Login": u_key, "Nome": u_val['name'], "Perfil": u_val['role']})
@@ -327,7 +327,9 @@ def main():
             
             custo_base = 0.0
             if sel_prod != "Novo Produto (Digitar manual)":
-                custo_base = float(df[df['produto'] == sel_prod]['custo'].iloc[0])
+                if not df.empty:
+                    val = df[df['produto'] == sel_prod]['custo'].iloc[0]
+                    custo_base = float(val) if pd.notnull(val) else 0.0
                 st.caption(f"Custo Base importado: R$ {custo_base:.2f}")
             
             custo_final = st.number_input("Custo Insumos (R$)", value=custo_base, format="%.2f")
@@ -343,7 +345,6 @@ def main():
             margem_target = st.slider("Margem de Lucro Líquido Desejada (%)", 0, 100, 20)
             
             # Cálculo
-            # Preço = (Custo + Emb + Cupom) / (1 - (Taxas + Margem))
             custo_total = custo_final + embalagem
             divisor = 1 - (taxas_totais/100) - (margem_target/100)
             
@@ -367,7 +368,7 @@ def main():
     elif choice == "Dashboard Inteligente":
         st.title("📊 Painel Financeiro Real")
         
-        # Configuração de Custos (Sidebar interna ou Expander)
+        # Configuração de Custos
         with st.expander("⚙️ Configurar Parâmetros de Custo do Mês", expanded=False):
             c_a, c_b, c_c = st.columns(3)
             fp = st.session_state.fin_params
@@ -385,7 +386,7 @@ def main():
 
         df = st.session_state.data_base
         if df.empty:
-            st.warning("Sem dados para analisar.")
+            st.warning("Sem dados para analisar. Vá em 'Central de Dados' primeiro.")
         else:
             df = analisar_dados(df)
             
@@ -395,7 +396,8 @@ def main():
             lucro_bruto = faturamento_total - custo_produtos
             
             fp = st.session_state.fin_params
-            impostos_valor = faturamento_total * (fp['imposto'] / 100) # Assumindo que 'imposto' aqui já soma taxas
+            # Taxa está somada no campo imposto para simplificar o cálculo
+            impostos_valor = faturamento_total * (fp['imposto'] / 100) 
             despesas_operacionais = fp['custo_fixo'] + fp['desperdicio']
             
             lucro_liquido = lucro_bruto - impostos_valor - despesas_operacionais
@@ -445,7 +447,8 @@ def main():
             if df.empty:
                 st.warning("Carregue produtos primeiro.")
             else:
-                prods = st.multiselect("Selecione os Produtos do Combo", df['produto'].unique())
+                st.markdown("Selecione os produtos para montar um kit:")
+                prods = st.multiselect("Produtos do Combo", df['produto'].unique())
                 
                 if prods:
                     # Filtra e soma
@@ -455,4 +458,46 @@ def main():
                     
                     c1, c2, c3 = st.columns(3)
                     c1.metric("Preço Tabela (Soma)", f"R$ {venda_soma:.2f}")
-                    c2.metric("Custo Itens", f"R$ {cust
+                    # CORREÇÃO AQUI: F-string fechada corretamente
+                    c2.metric("Custo Itens", f"R$ {custo_total:.2f}")
+                    
+                    preco_promo = c3.number_input("Preço Promocional do Combo", value=float(venda_soma)*0.9)
+                    
+                    if preco_promo > 0:
+                        lucro = preco_promo - custo_total
+                        margem = (lucro / preco_promo) * 100
+                        
+                        st.info(f"💰 Lucro do Combo: R$ {lucro:.2f}")
+                        if margem < 20:
+                            st.error(f"Margem Baixa: {margem:.1f}%")
+                        elif margem > 40:
+                            st.success(f"Margem Excelente: {margem:.1f}%")
+                        else:
+                            st.warning(f"Margem OK: {margem:.1f}%")
+
+        with tab_ia:
+            if df.empty:
+                st.info("Necessário base de dados.")
+            else:
+                c_head, c_btn = st.columns([3,1])
+                c_head.write("A IA analisa a Curva ABC e Margens para sugerir 5 combos estratégicos.")
+                
+                # Botão gera novas sugestões
+                if 'sugestoes_ia' not in st.session_state or c_btn.button("🔄 Gerar Novas Ideias"):
+                    st.session_state.sugestoes_ia = gerar_combos_ia(df, 5)
+                
+                sugestoes = st.session_state.sugestoes_ia
+                
+                if not sugestoes:
+                    st.warning("Não encontrei correlações suficientes nos dados atuais (poucos produtos).")
+                else:
+                    for s in sugestoes:
+                        with st.expander(f"💡 {s['titulo']}: {s['prod1']} + {s['prod2']}", expanded=True):
+                            col_A, col_B, col_C = st.columns(3)
+                            col_A.metric("De (Separados)", f"R$ {s['venda_full']:.2f}")
+                            col_B.metric(f"Por (Desc {s['desconto']:.0f}%)", f"R$ {s['venda_promo']:.2f}")
+                            col_C.metric("Margem Combo", f"{s['margem']:.1f}%")
+                            st.caption(f"**Racional:** {s['racional']}")
+
+if __name__ == "__main__":
+    main()
