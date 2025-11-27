@@ -2,464 +2,368 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
+import pdfplumber
+import io
 from typing import Tuple, List, Dict
 
 # ----------------------------------------------------------------------------
-# 1. CONFIGURAÇÃO E ESTILO VISUAL
+# 1. CONFIGURAÇÃO E ESTILO
 # ----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Panificadora ProfitOS",
+    page_title="Panificadora ProfitOS 2.0",
     layout="wide",
     initial_sidebar_state="expanded",
     page_icon="🍞"
 )
 
-# CSS Customizado para visual de Dashboard Profissional
 st.markdown("""
 <style>
-    /* Cards de Métricas */
     div[data-testid="stMetric"] {
         background-color: #f0f2f6;
         border: 1px solid #dcdcdc;
-        padding: 15px;
-        border-radius: 10px;
-        box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
+        padding: 10px;
+        border-radius: 8px;
     }
-    /* Títulos */
-    h1, h2, h3 {
-        color: #2c3e50;
-    }
-    /* Sidebar */
-    [data-testid="stSidebar"] {
-        background-color: #f8f9fa;
-    }
-    /* Botões */
-    div.stButton > button {
-        width: 100%;
-        border-radius: 5px;
-        font-weight: bold;
-    }
+    [data-testid="stSidebar"] { background-color: #f8f9fa; }
+    h1, h2 { color: #2c3e50; }
+    .stDataFrame { border: 1px solid #ddd; border-radius: 5px; }
 </style>
 """, unsafe_allow_html=True)
 
 # ----------------------------------------------------------------------------
-# 2. LÓGICA DE NEGÓCIO (Fórmulas do Relatório)
+# 2. INTEELIGÊNCIA DE DADOS & FUNÇÕES
 # ----------------------------------------------------------------------------
 
-def authenticate(username: str, password: str, role: str) -> bool:
-    # Em produção: usar hash e banco de dados
+def authenticate(username, password, role):
+    # Em produção, usar hash seguro
     users = {
-        "master": ("admin123", "master"),       # Senha alterada para padrão forte sugerido
+        "master": ("admin123", "master"),
         "socia": ("socia123", "master"),
         "gerente": ("gerente123", "gerente"),
         "vendedor": ("venda1", "vendedor"),
     }
     cred = users.get(username)
-    if cred is None:
-        return False
-    stored_password, stored_role = cred
-    # Master pode acessar tudo, mas aqui validamos se a role bate com a intenção
-    if stored_role == "master" and role != "master":
-         return True # Master pode logar como outros perfis se quiser testar
-    return (password == stored_password) and (role == stored_role)
+    if cred and cred[0] == password:
+        # Permite acesso se a role for compativel ou se for master acessando outros
+        if cred[1] == "master" or cred[1] == role:
+            return True
+    return False
 
-def calcular_dna(custo_fixo, faturamento, taxa_cartoes, imposto_pago, royalty) -> Tuple[float, float]:
-    if faturamento <= 0:
-        return 0.0, 0.0
-    resultado_cf = custo_fixo / faturamento
-    # DNA = (CF/Fat) + Taxas + Impostos + Royalty
-    dna_total = resultado_cf + (taxa_cartoes / 100.0) + (imposto_pago / 100.0) + (royalty / 100.0)
-    return resultado_cf, dna_total
+def normalizar_colunas(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    IA Lógica: Mapeia nomes variados de colunas para o padrão do sistema.
+    """
+    # Remove espaços e joga pra minusculo
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    
+    # Dicionário de Sinônimos (O sistema entende essas variações)
+    mapa = {
+        'produto': ['nome', 'descrição', 'item', 'mercadoria', 'produto'],
+        'quantidade': ['qtd', 'quant', 'quantidade', 'volume', 'unidades'],
+        'custo': ['custo', 'custo unit', 'vl custo', 'preço de custo', 'custo_unitario'],
+        'preco_venda': ['venda', 'preço venda', 'vl venda', 'preço de venda', 'preco medio', 'preço médio r$'],
+        'faturamento': ['total', 'faturamento', 'total r$', 'valor total'],
+        'percentual': ['%', 'perc', 'part', 'participacao'],
+        'acumulado': ['acum', 'acumulado', '% acum']
+    }
+    
+    rename_dict = {}
+    for padrao, variacoes in mapa.items():
+        for col in df.columns:
+            # Verifica correspondência exata ou parcial
+            if col in variacoes or any(v in col for v in variacoes if len(v) > 3):
+                rename_dict[col] = padrao
+                break # Para ao encontrar a primeira correspondencia para evitar duplicidade
+    
+    df = df.rename(columns=rename_dict)
+    
+    # Garante colunas mínimas se não existirem
+    required = ['produto', 'quantidade', 'custo', 'preco_venda']
+    for req in required:
+        if req not in df.columns:
+            if req == 'custo': df[req] = 0.0
+            elif req == 'quantidade': df[req] = 0.0
+            elif req == 'preco_venda': df[req] = 0.0
+            else: df[req] = "Produto Desconhecido"
+            
+    return df
 
-def precificar_produto(cmv, embalagem, taxa_entrega, dna, lucro_desejado) -> float:
-    # Preço = (Custos Diretos) / (1 - DNA - Margem)
-    denominator = 1.0 - dna - lucro_desejado
-    if denominator <= 0:
-        return np.nan
-    return (cmv + embalagem + taxa_entrega) / denominator
+def extrair_pdf(file) -> pd.DataFrame:
+    """
+    Tenta extrair tabelas de um PDF usando pdfplumber.
+    """
+    all_data = []
+    with pdfplumber.open(file) as pdf:
+        for page in pdf.pages:
+            # Tenta extrair tabela
+            table = page.extract_table()
+            if table:
+                df_page = pd.DataFrame(table[1:], columns=table[0])
+                all_data.append(df_page)
+    
+    if all_data:
+        return pd.concat(all_data, ignore_index=True)
+    return pd.DataFrame()
 
-def precificar_ifood(preco_cardapio, taxa_entrega, campanha, cupom, taxa_comissao) -> Tuple[float, float]:
-    # Valor iFood = (Preço + Entrega + Campanha) / (1 - Comissão)
-    denominator = 1.0 - taxa_comissao
-    if denominator <= 0:
-        return np.nan, np.nan
-    valor_minimo_ifood = (preco_cardapio + taxa_entrega + campanha) / denominator
-    preco_final_cliente = valor_minimo_ifood + cupom
-    return valor_minimo_ifood, preco_final_cliente
+def processar_upload(file):
+    try:
+        if file.name.endswith('.csv'):
+            df = pd.read_csv(file, encoding='latin1', sep=None, engine='python')
+        elif file.name.endswith(('.xls', '.xlsx')):
+            df = pd.read_excel(file)
+        elif file.name.endswith('.pdf'):
+            df = extrair_pdf(file)
+        else:
+            return None, "Formato não suportado."
+        
+        # Limpeza Numérica (Converter '1.200,50' para float)
+        df = normalizar_colunas(df)
+        cols_num = ['custo', 'preco_venda', 'quantidade', 'faturamento']
+        for col in cols_num:
+            if col in df.columns:
+                if df[col].dtype == 'object':
+                    df[col] = df[col].astype(str).str.replace('R$', '').str.replace('.', '').str.replace(',', '.')
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+                
+        return df, None
+    except Exception as e:
+        return None, str(e)
 
 def analisar_menu(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    # Tratamento básico de nomes de colunas
-    df.columns = [c.lower().strip() for c in df.columns]
-    
-    # Cálculos Financeiros
-    df['faturamento'] = df['quantidade'] * df['preco_venda']
-    df['custo_total'] = df['quantidade'] * df['custo']
-    df['lucro'] = df['faturamento'] - df['custo_total']
+    # Recalcula campos calculados se faltarem
+    if 'faturamento' not in df.columns or df['faturamento'].sum() == 0:
+        df['faturamento'] = df['quantidade'] * df['preco_venda']
+        
+    df['lucro'] = df['faturamento'] - (df['quantidade'] * df['custo'])
     df['margem_perc'] = df['lucro'] / df['faturamento'].replace(0, np.nan)
 
-    # Classificação ABC (Volume de Vendas/Quantidade)
-    df = df.sort_values(by='quantidade', ascending=False)
-    df['pct_acumulado'] = df['quantidade'].cumsum() / df['quantidade'].sum()
+    # Curva ABC
+    df = df.sort_values(by='faturamento', ascending=False)
+    df['acumulado_calc'] = df['faturamento'].cumsum() / df['faturamento'].sum()
     
-    conditions_abc = [df['pct_acumulado'] <= 0.2, df['pct_acumulado'] <= 0.5]
-    choices_abc = ['A', 'B']
-    df['categoria_abc'] = np.select(conditions_abc, choices_abc, default='C')
-
-    # Classificação BCG Adaptada (Margem vs Volume)
-    median_margem = df['margem_perc'].median()
-    df['alta_margem'] = df['margem_perc'] >= median_margem
+    # Classificação ABC
+    conditions = [df['acumulado_calc'] <= 0.80, df['acumulado_calc'] <= 0.95]
+    choices = ['A', 'B']
+    df['classe_abc'] = np.select(conditions, choices, default='C')
+    
+    # Classificação BCG (Margem vs Volume)
+    mediana_margem = df['margem_perc'].median()
+    df['alta_margem'] = df['margem_perc'] >= mediana_margem
     
     bcg = []
     for _, row in df.iterrows():
-        # A ou B = Alto Volume
-        alto_volume = row['categoria_abc'] in ['A', 'B']
-        alta_margem = row['alta_margem']
+        eh_popular = row['classe_abc'] in ['A', 'B'] # Alto Volume/Fat
+        tem_margem = row['alta_margem']
         
-        if alto_volume and alta_margem: bcg.append('🌟 Estrela')
-        elif alto_volume and not alta_margem: bcg.append('🐮 Burro de Carga')
-        elif not alto_volume and alta_margem: bcg.append('🧩 Quebra-Cabeça')
+        if eh_popular and tem_margem: bcg.append('🌟 Estrela')
+        elif eh_popular and not tem_margem: bcg.append('🐮 Burro de Carga')
+        elif not eh_popular and tem_margem: bcg.append('🧩 Quebra-Cabeça')
         else: bcg.append('🐕 Cão')
-    
     df['categoria_bcg'] = bcg
+    
     return df
 
-def sugerir_combos(df: pd.DataFrame, desconto: float, max_sugestoes: int) -> pd.DataFrame:
-    # Lógica: Unir Burro de Carga (Volume) + Quebra-Cabeça (Margem)
-    burros = df[df['categoria_bcg'] == '🐮 Burro de Carga'].sort_values('quantidade', ascending=False)
-    quebras = df[df['categoria_bcg'] == '🧩 Quebra-Cabeça'].sort_values('margem_perc', ascending=False)
-
-    combos = []
-    
-    # Tenta parear os tops de cada lista
-    for _, b in burros.head(max_sugestoes).iterrows():
-        for _, q in quebras.head(max_sugestoes).iterrows():
-            preco_orig = b['preco_venda'] + q['preco_venda']
-            custo_combo = b['custo'] + q['custo']
-            preco_promo = preco_orig * (1 - desconto)
-            lucro_promo = preco_promo - custo_combo
-            margem_promo = lucro_promo / preco_promo if preco_promo > 0 else 0
-            
-            combos.append({
-                "Combo": f"{b['produto']} + {q['produto']}",
-                "Preço Original": preco_orig,
-                "Preço Promo": preco_promo,
-                "Lucro Previsto": lucro_promo,
-                "Margem %": margem_promo * 100,
-                "Estratégia": "Volume do Burro de Carga impulsiona Margem do Quebra-Cabeça"
-            })
-            if len(combos) >= max_sugestoes: break
-        if len(combos) >= max_sugestoes: break
-            
-    return pd.DataFrame(combos)
-
 # ----------------------------------------------------------------------------
-# 3. INTERFACE DE USUÁRIO (FRONTEND)
+# 3. INTERFACE
 # ----------------------------------------------------------------------------
 
 def main():
-    # Inicialização de Estado
+    # Inicializa sessão
+    if 'data_base' not in st.session_state:
+        # Estrutura base vazia
+        st.session_state.data_base = pd.DataFrame(columns=[
+            'produto', 'custo', 'preco_venda', 'quantidade', 'faturamento', 'classe_abc'
+        ])
     if 'dna_params' not in st.session_state:
-        st.session_state.dna_params = {
-            'custo_fixo': 0.0, 'faturamento': 1.0, 
-            'taxa_cartoes': 0.0, 'imposto_pago': 0.0, 'royalty': 0.0,
-            'dna': 0.0, 'resultado_cf': 0.0
-        }
-    if 'authenticated' not in st.session_state:
-        st.session_state.authenticated = False
+        st.session_state.dna_params = {'dna': 0.0, 'custo_fixo': 0.0, 'faturamento': 1.0}
+    if 'logged_in' not in st.session_state:
+        st.session_state.logged_in = False
 
-    # --- TELA DE LOGIN ---
-    if not st.session_state.authenticated:
-        col1, col2, col3 = st.columns([1,2,1])
-        with col2:
-            st.title("🍞 ProfitOS Login")
-            st.markdown("---")
-            with st.form("login_form"):
-                username = st.text_input("Usuário")
-                password = st.text_input("Senha", type="password")
-                role = st.selectbox("Perfil", ["vendedor", "gerente", "master"])
-                if st.form_submit_button("Acessar Sistema"):
-                    if authenticate(username, password, role):
-                        st.session_state.authenticated = True
-                        st.session_state.role = role
-                        st.session_state.username = username
+    # --- LOGIN ---
+    if not st.session_state.logged_in:
+        c1, c2, c3 = st.columns([1,2,1])
+        with c2:
+            st.title("🍞 ProfitOS 2.0")
+            with st.form("login"):
+                u = st.text_input("Usuário")
+                p = st.text_input("Senha", type="password")
+                r = st.selectbox("Perfil", ["master", "gerente", "vendedor"])
+                if st.form_submit_button("Entrar"):
+                    if authenticate(u, p, r):
+                        st.session_state.logged_in = True
+                        st.session_state.user = u
+                        st.session_state.role = r
                         st.rerun()
                     else:
-                        st.error("Acesso negado. Verifique as credenciais.")
+                        st.error("Dados inválidos")
         return
 
-    # --- SIDEBAR (NAVEGAÇÃO E INFO) ---
+    # --- SIDEBAR ---
     role = st.session_state.role
-    st.sidebar.title("🍞 ProfitOS")
-    st.sidebar.markdown(f"👤 **{st.session_state.username.upper()}** ({role})")
+    st.sidebar.title("🍞 Menu")
+    st.sidebar.caption(f"Logado: {st.session_state.user} ({role})")
     
-    # Menu dinâmico por permissão
-    options = ["Precificador", "Simulador de Vendas"]
-    if role in ['master', 'gerente']:
-        options = ["Dashboard Estratégico", "Precificador", "Combos Lucrativos", "Simulador de Vendas", "Marketing"]
-    if role == 'master':
-        options.append("Configuração DNA")
-        
-    menu = st.sidebar.radio("Menu Principal", options)
+    opts = ["Central de Dados", "Dashboard Inteligente", "Precificador", "Combos IA"]
+    if role == "vendedor": opts = ["Precificador"]
     
-    st.sidebar.markdown("---")
-    # Indicador de DNA (Sempre visível)
-    dna_val = st.session_state.dna_params['dna']
-    st.sidebar.metric("🧬 DNA da Empresa", f"{dna_val*100:.1f}%", help="Soma de CF%, Impostos, Taxas e Royalties")
+    nav = st.sidebar.radio("Navegação", opts)
     
     if st.sidebar.button("Sair"):
-        st.session_state.authenticated = False
+        st.session_state.logged_in = False
         st.rerun()
 
-    # --- PÁGINAS ---
-
-    # 1. DASHBOARD ESTRATÉGICO
-    if menu == "Dashboard Estratégico":
-        st.title("📊 Análise Estratégica de Cardápio")
-        st.markdown("Importe sua **Curva ABC** ou planilha de vendas para gerar inteligência.")
+    # --- PÁGINA 1: CENTRAL DE DADOS (IMPORTAÇÃO + MANUAL) ---
+    if nav == "Central de Dados":
+        st.title("📂 Central de Dados & Produtos")
+        st.markdown("Aqui você alimenta a Inteligência do sistema. Importe arquivos ou cadastre manualmente.")
         
-        file = st.file_uploader("Upload de Vendas (CSV/Excel)", type=['csv','xlsx'])
-        if file:
-            try:
-                df_raw = pd.read_csv(file) if file.name.endswith('.csv') else pd.read_excel(file)
-                # Validação básica
-                required = ['produto', 'quantidade', 'preco_venda', 'custo']
-                # Tenta normalizar colunas caso o usuário suba diferente
-                df_raw.columns = [c.lower().strip() for c in df_raw.columns]
-                
-                if not set(required).issubset(df_raw.columns):
-                    st.error(f"Faltam colunas obrigatórias. Necessário: {required}")
-                else:
-                    df_analise = analisar_menu(df_raw)
-                    
-                    # KPIs Topo
-                    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-                    kpi1.metric("Faturamento Total", f"R$ {df_analise['faturamento'].sum():,.2f}")
-                    kpi2.metric("Lucro Bruto Total", f"R$ {df_analise['lucro'].sum():,.2f}")
-                    kpi3.metric("Ticket Médio", f"R$ {df_analise['preco_venda'].mean():,.2f}")
-                    kpi4.metric("Qtd Produtos", len(df_analise))
-                    
-                    st.markdown("---")
-                    
-                    # Gráficos Lado a Lado
-                    g1, g2 = st.columns(2)
-                    with g1:
-                        st.subheader("Matriz BCG (Volume x Margem)")
-                        fig_bcg = px.scatter(df_analise, x='margem_perc', y='quantidade', 
-                                             color='categoria_bcg', size='faturamento',
-                                             hover_name='produto', title="Distribuição de Produtos")
-                        # Linhas médias
-                        fig_bcg.add_hline(y=df_analise['quantidade'].median(), line_dash="dash", annotation_text="Média Vol.")
-                        fig_bcg.add_vline(x=df_analise['margem_perc'].median(), line_dash="dash", annotation_text="Média Margem")
-                        st.plotly_chart(fig_bcg, use_container_width=True)
-                        
-                    with g2:
-                        st.subheader("Faturamento por Categoria")
-                        df_g = df_analise.groupby('categoria_bcg')['faturamento'].sum().reset_index()
-                        fig_pie = px.pie(df_g, values='faturamento', names='categoria_bcg', donut=0.4)
-                        st.plotly_chart(fig_pie, use_container_width=True)
-                    
-                    with st.expander("Ver Tabela Detalhada dos Dados"):
-                        st.dataframe(df_analise)
-                        
-            except Exception as e:
-                st.error(f"Erro ao processar arquivo: {e}")
-
-    # 2. CONFIGURAÇÃO DNA (MASTER ONLY)
-    elif menu == "Configuração DNA":
-        st.title("🧬 Configuração do DNA do Lucro")
-        st.info("Estes valores afetam diretamente o precificador de todos os usuários.")
-        
-        with st.form("dna_config"):
-            col1, col2 = st.columns(2)
-            with col1:
-                cf = st.number_input("Custo Fixo Mensal (R$)", value=st.session_state.dna_params['custo_fixo'])
-                fat = st.number_input("Faturamento Médio Mensal (R$)", value=st.session_state.dna_params['faturamento'])
-            with col2:
-                taxa = st.number_input("Taxa Média Cartão (%)", value=st.session_state.dna_params['taxa_cartoes'])
-                imp = st.number_input("Imposto (%)", value=st.session_state.dna_params['imposto_pago'])
-                roy = st.number_input("Royalties/Franquia (%)", value=st.session_state.dna_params['royalty'])
+        with st.expander("ℹ️ Ver Modelo de Importação Ideal (Margem de Flexibilidade)", expanded=False):
+            st.info("""
+            **O sistema usa IA para tentar ler qualquer formato**, mas este é o ideal para garantir 100% de precisão:
             
-            if st.form_submit_button("💾 Atualizar DNA da Empresa"):
-                res_cf, dna_total = calcular_dna(cf, fat, taxa, imp, roy)
-                st.session_state.dna_params.update({
-                    'custo_fixo': cf, 'faturamento': fat, 'taxa_cartoes': taxa,
-                    'imposto_pago': imp, 'royalty': roy, 'resultado_cf': res_cf, 'dna': dna_total
-                })
-                st.success(f"DNA Atualizado para {dna_total*100:.2f}%!")
-                st.rerun()
-
-    # 3. PRECIFICADOR (PRINCIPAL)
-    elif menu == "Precificador":
-        st.title("🏷️ Precificador Inteligente")
-        
-        tab1, tab2 = st.tabs(["🏪 Venda Balcão", "🛵 Venda iFood/Delivery"])
-        
-        # TAB 1: BALCÃO
-        with tab1:
-            col_in, col_res = st.columns([1, 1])
-            with col_in:
-                st.subheader("Dados do Produto")
-                cmv = st.number_input("Custo Insumos (CMV) R$", 0.0, format="%.2f")
-                emb = st.number_input("Embalagem R$", 0.0, format="%.2f")
-                margem_user = st.slider("Margem de Lucro Desejada (%)", 0, 100, 20)
+            | Produto | Quantidade | Custo Unit | Preço Venda | Faturamento | % | Acumulado |
+            | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+            | Pão Francês | 1000 | 0.30 | 0.90 | 900.00 | 5% | 5% |
             
-            with col_res:
-                st.subheader("Resultado Sugerido")
-                dna_atual = st.session_state.dna_params['dna']
-                
-                if dna_atual == 0:
-                    st.warning("⚠️ DNA não configurado! O cálculo considerará apenas custo e margem.")
-                
-                preco = precificar_produto(cmv, emb, 0, dna_atual, margem_user/100)
-                
-                if pd.isna(preco) or preco < 0:
-                    st.error("Erro matemático: Margem + DNA ultrapassam 100%. Reduza a margem.")
-                else:
-                    st.metric("Preço de Venda Sugerido", f"R$ {preco:.2f}")
-                    st.caption(f"Composição: Custo R$ {cmv+emb:.2f} | DNA Empresa {dna_atual*100:.1f}% | Lucro {margem_user}%")
-                    
-                    # Gráfico de composição do preço
-                    dados_pie = {
-                        'Custo': cmv+emb,
-                        'Custos Fixos/Impostos (DNA)': preco * dna_atual,
-                        'Lucro Líquido': preco * (margem_user/100)
-                    }
-                    fig = px.pie(values=list(dados_pie.values()), names=list(dados_pie.keys()), hole=0.5)
-                    fig.update_layout(height=250, margin=dict(t=0, b=0, l=0, r=0))
-                    st.plotly_chart(fig, use_container_width=True)
-
-        # TAB 2: IFOOD
-        with tab2:
-            st.markdown("Calculadora reversa para garantir lucro após taxas do app.")
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                p_cardapio = st.number_input("Preço Balcão (R$)", 0.0)
-                t_entrega = st.number_input("Custo Entrega (R$)", 0.0)
-            with c2:
-                campanha = st.number_input("Investimento Campanha (R$)", 0.0)
-                cupom = st.number_input("Cupom Cliente (R$)", 0.0)
-            with c3:
-                plano = st.selectbox("Plano iFood", ["Básico (12%)", "Entrega (23%)", "Full (27%)"])
-                taxa_com = int(plano.split('(')[1][:2]) / 100
-            
-            if st.button("Calcular iFood"):
-                v_min, p_final = precificar_ifood(p_cardapio, t_entrega, campanha, cupom, taxa_com)
-                
-                if pd.isna(v_min):
-                    st.error("Taxas inviáveis.")
-                else:
-                    st.success("Cálculo Realizado!")
-                    col_r1, col_r2 = st.columns(2)
-                    col_r1.metric("Valor Mínimo (Receber)", f"R$ {v_min:.2f}", delta="Cobre custos + comissão")
-                    col_r2.metric("Preço Final (App)", f"R$ {p_final:.2f}", delta="Para o cliente", delta_color="inverse")
-                    st.info(f"O produto deve aparecer no app por **R$ {p_final:.2f}**. Você receberá o equivalente a **R$ {v_min:.2f}** (antes do desconto do cupom).")
-
-    # 4. COMBOS LUCRATIVOS
-    elif menu == "Combos Lucrativos":
-        st.title("🤖 Gerador de Combos (IA Lógica)")
-        st.markdown("Algoritmo que cruza **Burros de Carga** (atração) com **Quebra-Cabeças** (lucro).")
-        
-        file_combo = st.file_uploader("Dados de Vendas", type=['csv','xlsx'], key='combo_up')
-        desc = st.slider("Desconto no Combo (%)", 5, 30, 10)
-        
-        if file_combo:
-            df_c = pd.read_csv(file_combo) if file_combo.name.endswith('.csv') else pd.read_excel(file_combo)
-            df_c.columns = [c.lower().strip() for c in df_c.columns]
-            
-            # Processa e gera
-            df_an = analisar_menu(df_c)
-            sugestoes = sugerir_combos(df_an, desc/100, 5)
-            
-            if not sugestoes.empty:
-                st.subheader("Top 5 Sugestões")
-                for i, row in sugestoes.iterrows():
-                    with st.expander(f"🏅 {row['Combo']} (Margem {row['Margem %']:.1f}%)", expanded=True):
-                        c1, c2, c3 = st.columns(3)
-                        c1.metric("De (Separado)", f"R$ {row['Preço Original']:.2f}")
-                        c2.metric("Por (Combo)", f"R$ {row['Preço Promo']:.2f}")
-                        c3.metric("Lucro Líquido", f"R$ {row['Lucro Previsto']:.2f}")
-                        st.caption(f"💡 Por que? {row['Estratégia']}")
-            else:
-                st.warning("Não foram encontrados pares ideais nos dados fornecidos.")
-
-    # 5. SIMULADOR E MARKETING
-    elif menu == "Simulador de Vendas":
-        st.title("🧮 Simulador de Faturamento")
-        st.markdown("Teste cenários antes de lançar promoções.")
-        
-        # Criação manual de dataframe de exemplo se não houver upload
-        if 'simulador_df' not in st.session_state:
-            st.session_state.simulador_df = pd.DataFrame(columns=['produto', 'preco_venda', 'custo'])
-        
-        with st.expander("Carregar Catálogo"):
-            up_sim = st.file_uploader("Catálogo (CSV)", key="sim_up")
-            if up_sim:
-                df_s = pd.read_csv(up_sim)
-                df_s.columns = [c.lower().strip() for c in df_s.columns]
-                st.session_state.simulador_df = df_s
-        
-        df_prod = st.session_state.simulador_df
-        
-        if not df_prod.empty:
-            prods = st.multiselect("Selecione Produtos", df_prod['produto'].unique())
-            
-            fatura_total = 0
-            custo_total = 0
-            
-            if prods:
-                st.subheader("Defina as Quantidades")
-                for p in prods:
-                    row = df_prod[df_prod['produto'] == p].iloc[0]
-                    col_q, col_inf = st.columns([1, 3])
-                    qtd = col_q.number_input(f"Qtd {p}", 1, 1000, 10)
-                    
-                    sub_fat = qtd * row['preco_venda']
-                    sub_cust = qtd * row['custo']
-                    
-                    col_inf.write(f"💵 Fat: R$ {sub_fat:.2f} | 📉 Custo: R$ {sub_cust:.2f}")
-                    
-                    fatura_total += sub_fat
-                    custo_total += sub_cust
-                
-                st.markdown("---")
-                st.subheader("Resultado da Simulação")
-                r1, r2, r3 = st.columns(3)
-                r1.metric("Faturamento", f"R$ {fatura_total:.2f}")
-                r2.metric("Custos Variáveis", f"R$ {custo_total:.2f}")
-                lucro_sim = fatura_total - custo_total
-                r3.metric("Margem de Contribuição", f"R$ {lucro_sim:.2f}", 
-                          delta=f"{(lucro_sim/fatura_total)*100:.1f}%" if fatura_total > 0 else "0%")
-        else:
-            st.info("Carregue um arquivo com colunas 'produto', 'preco_venda', 'custo' para começar.")
-
-    elif menu == "Marketing":
-        st.title("🚀 Insights & Estratégias")
-        
-        tab_m1, tab_m2, tab_m3 = st.tabs(["🧠 Psicologia", "🥐 Engenharia de Menu", "⏰ Happy Hour"])
-        
-        with tab_m1:
-            st.subheader("Efeito Isca (Decoy Effect)")
-            st.markdown("""
-            Ao criar combos, use 3 opções para direcionar a venda para o **Médio**.
-            * ❌ **Pequeno:** R$ 15,00 (Parece caro pelo que oferece)
-            * ✅ **Médio:** R$ 18,00 (Parece muito vantajoso perto do pequeno)
-            * ❌ **Grande:** R$ 28,00 (Ancoragem de preço alto)
+            *Formatos aceitos:* .xlsx (Excel), .csv (Texto), .pdf (Relatórios do Sistema)
             """)
-            st.image("https://images.pexels.com/photos/8901706/pexels-photo-8901706.jpeg?auto=compress&cs=tinysrgb&w=600", caption="Aplique no cardápio visual")
 
-        with tab_m2:
-            st.subheader("Como tratar cada categoria BCG")
+        tab_imp, tab_man = st.tabs(["📤 Importar Arquivo", "📝 Cadastro Manual / Edição"])
+        
+        with tab_imp:
+            file = st.file_uploader("Arraste seu relatório (ABC, Vendas, Custos)", type=['csv', 'xlsx', 'pdf'])
+            if file:
+                df_new, err = processar_upload(file)
+                if err:
+                    st.error(f"Erro na leitura: {err}")
+                else:
+                    st.success(f"Arquivo lido com sucesso! {len(df_new)} linhas identificadas.")
+                    st.dataframe(df_new.head())
+                    
+                    if st.button("Confirmar e Carregar para Análise"):
+                        st.session_state.data_base = df_new
+                        st.success("Dados carregados para o sistema! Vá para o Dashboard.")
+
+        with tab_man:
+            st.markdown("Use a tabela abaixo para **cadastrar produtos novos** ou **corrigir** dados importados.")
+            
+            # Editor de Dados
+            edited_df = st.data_editor(
+                st.session_state.data_base,
+                num_rows="dynamic",
+                column_config={
+                    "custo": st.column_config.NumberColumn("Custo (R$)", format="%.2f"),
+                    "preco_venda": st.column_config.NumberColumn("Venda (R$)", format="%.2f"),
+                    "faturamento": st.column_config.NumberColumn("Faturamento (R$)", format="%.2f"),
+                },
+                use_container_width=True
+            )
+            
+            if st.button("Salvar Alterações Manuais"):
+                st.session_state.data_base = edited_df
+                st.success("Base de dados atualizada!")
+
+    # --- PÁGINA 2: DASHBOARD ---
+    elif nav == "Dashboard Inteligente":
+        st.title("📊 Análise 360º")
+        
+        df = st.session_state.data_base
+        
+        if df.empty or 'produto' not in df.columns:
+            st.warning("⚠️ Nenhum dado carregado. Vá em 'Central de Dados' e importe um arquivo ou cadastre produtos.")
+        else:
+            # Processa Análise
+            df_analise = analisar_menu(df)
+            
+            # KPI
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Faturamento Analisado", f"R$ {df_analise['faturamento'].sum():,.2f}")
+            k2.metric("Lucro Estimado", f"R$ {df_analise['lucro'].sum():,.2f}")
+            k3.metric("Margem Média", f"{df_analise['margem_perc'].mean()*100:.1f}%")
+            k4.metric("Total Produtos", len(df_analise))
+            
+            # Gráficos
             c1, c2 = st.columns(2)
-            c1.success("**🌟 Estrelas:** Não mexa no preço! Invista em fotos bonitas e destaque no balcão.")
-            c1.info("**🐮 Burros de Carga:** Mantenha a qualidade, mas tente negociar insumos mais baratos. Eles pagam as contas.")
-            c2.warning("**🧩 Quebra-Cabeça:** Ótima margem, mas não vende. Faça degustação ou inclua em combos.")
-            c2.error("**🐕 Cães:** Pare de produzir. Substitua por novidades.")
+            with c1:
+                st.subheader("Curva ABC (Pareto)")
+                fig_abc = px.bar(df_analise.head(20), x='produto', y='faturamento', color='classe_abc', title="Top 20 Produtos")
+                st.plotly_chart(fig_abc, use_container_width=True)
+            
+            with c2:
+                st.subheader("Matriz de Lucratividade")
+                fig_bcg = px.scatter(df_analise, x='margem_perc', y='faturamento', color='categoria_bcg',
+                                     hover_name='produto', size='quantidade', title="Volume vs Margem")
+                # Adiciona linhas de corte
+                fig_bcg.add_hline(y=df_analise['faturamento'].mean(), line_dash="dash", annotation_text="Média Fat.")
+                fig_bcg.add_vline(x=df_analise['margem_perc'].median(), line_dash="dash", annotation_text="Mediana Margem")
+                st.plotly_chart(fig_bcg, use_container_width=True)
+            
+            st.dataframe(df_analise)
 
-        with tab_m3:
-            st.subheader("Estratégia Fim de Tarde")
-            st.write("Use o Precificador para calcular qual o desconto máximo (ex: 30%) que seus produtos 'Burro de Carga' aguentam após as 18h apenas para cobrir o custo variável e evitar desperdício.")
+    # --- PÁGINA 3: PRECIFICADOR ---
+    elif nav == "Precificador":
+        st.title("🏷️ Precificador Mestre")
+        
+        # Area de configuração rapida de DNA
+        if role == 'master':
+            with st.expander("⚙️ Configurar DNA (Custos da Empresa)"):
+                cf = st.number_input("Custo Fixo", value=st.session_state.dna_params.get('custo_fixo', 0.0))
+                fat = st.number_input("Faturamento Médio", value=st.session_state.dna_params.get('faturamento', 1.0))
+                taxas = st.number_input("Taxas + Impostos (%)", value=10.0)
+                
+                if st.button("Atualizar DNA"):
+                    dna = (cf/fat) + (taxas/100)
+                    st.session_state.dna_params = {'dna': dna, 'custo_fixo': cf, 'faturamento': fat}
+                    st.success(f"DNA: {dna*100:.2f}%")
+        
+        dna = st.session_state.dna_params.get('dna', 0.0)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Composição")
+            custo = st.number_input("Custo Insumos (R$)", 0.0)
+            margem = st.slider("Margem Desejada (%)", 0, 100, 25) / 100
+        
+        with col2:
+            st.subheader("Resultado")
+            divisor = 1 - dna - margem
+            if divisor <= 0:
+                st.error("Margem + Custos estouram 100%. Impossível precificar.")
+            else:
+                preco = custo / divisor
+                st.metric("Preço Sugerido", f"R$ {preco:.2f}")
+                st.write(f"Custo: {custo} | DNA: {dna*100:.1f}% | Lucro: {margem*100:.0f}%")
+
+    # --- PÁGINA 4: COMBOS IA ---
+    elif nav == "Combos IA":
+        st.title("🤖 Sugestão de Combos")
+        df = st.session_state.data_base
+        
+        if df.empty:
+            st.warning("Carregue dados na Central de Dados primeiro.")
+        else:
+            df = analisar_menu(df)
+            burros = df[df['categoria_bcg'] == '🐮 Burro de Carga']
+            quebras = df[df['categoria_bcg'] == '🧩 Quebra-Cabeça']
+            
+            if not burros.empty and not quebras.empty:
+                st.success("IA encontrou oportunidades de combinação!")
+                
+                b_prod = burros.iloc[0]
+                q_prod = quebras.iloc[0]
+                
+                total = b_prod['preco_venda'] + q_prod['preco_venda']
+                desc = total * 0.90
+                
+                st.metric("Combo Sugerido", f"{b_prod['produto']} + {q_prod['produto']}")
+                c1, c2 = st.columns(2)
+                c1.metric("Preço Original", f"R$ {total:.2f}")
+                c2.metric("Preço Combo (10% off)", f"R$ {desc:.2f}")
+                
+                st.info(f"Estratégia: Usar o alto volume de vendas do '{b_prod['produto']}' para impulsionar a venda do '{q_prod['produto']}' que tem alta margem.")
+            else:
+                st.info("Ainda não há dados suficientes classificados como Burro de Carga e Quebra-Cabeça para sugerir combos.")
 
 if __name__ == "__main__":
     main()
