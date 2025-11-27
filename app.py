@@ -41,7 +41,7 @@ def init_session():
     if 'users_db' not in st.session_state:
         st.session_state.users_db = {
             "master": {"pass": "admin123", "role": "master", "name": "Diretor"},
-            "gerente": {"pass": "gerente123", "role": "gerente", "name": "Gerente Loja"},
+            "administrador": {"pass": "Pmpa2025", "role": "admin", "name": "Pacha Mama"},
             "vendedor": {"pass": "venda1", "role": "vendedor", "name": "Balconista 1"}
         }
     
