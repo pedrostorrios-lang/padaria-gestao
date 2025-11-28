@@ -5,12 +5,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pdfplumber
 import random
+from io import BytesIO
 
 # ----------------------------------------------------------------------------
 # 1. CONFIGURAÇÃO E ESTILO
 # ----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Panificadora ProfitOS 3.0",
+    page_title="Panificadora ProfitOS 4.0",
     layout="wide",
     initial_sidebar_state="expanded",
     page_icon="🍞"
@@ -37,15 +38,15 @@ st.markdown("""
 # ----------------------------------------------------------------------------
 
 def init_session():
-    # Inicializa banco de dados de usuários se não existir
+    # Inicializa banco de dados de usuários
     if 'users_db' not in st.session_state:
         st.session_state.users_db = {
             "master": {"pass": "admin123", "role": "master", "name": "Diretor"},
-            "administrador": {"pass": "Pmpa2025", "role": "admin", "name": "Pacha Mama"},
+            "gerente": {"pass": "gerente123", "role": "gerente", "name": "Gerente Loja"},
             "vendedor": {"pass": "venda1", "role": "vendedor", "name": "Balconista 1"}
         }
     
-    # Inicializa dados financeiros
+    # Inicializa base de dados principal
     if 'data_base' not in st.session_state:
         st.session_state.data_base = pd.DataFrame(columns=[
             'produto', 'custo', 'preco_venda', 'quantidade', 'faturamento'
@@ -54,12 +55,16 @@ def init_session():
     # Parâmetros financeiros globais
     if 'fin_params' not in st.session_state:
         st.session_state.fin_params = {
-            'custo_fixo': 5000.0, 
+            'custo_fixo_valor': 5000.0, 
+            'faturamento_esperado': 20000.0, # Para calcular % do custo fixo
             'desperdicio': 200.0,
-            'imposto': 6.0, # Simples
-            'taxa_cartao': 3.5,
+            'imposto': 6.0, # Simples Nacional
+            'taxa_cartao': 3.0,
             'comissao': 0.0
         }
+
+def convert_df_to_csv(df):
+    return df.to_csv(index=False).encode('utf-8')
 
 def authenticate(username, password):
     users = st.session_state.users_db
@@ -85,7 +90,6 @@ def normalizar_colunas(df: pd.DataFrame) -> pd.DataFrame:
                 break
     df = df.rename(columns=rename_dict)
     
-    # Colunas obrigatórias
     req = ['produto', 'quantidade', 'custo', 'preco_venda']
     for r in req:
         if r not in df.columns: df[r] = 0.0 if r != 'produto' else 'Item Desconhecido'
@@ -124,19 +128,25 @@ def analisar_dados(df):
     if 'faturamento' not in df.columns or df['faturamento'].sum() == 0:
         df['faturamento'] = df['quantidade'] * df['preco_venda']
     
-    # Curva ABC
     df = df.sort_values('faturamento', ascending=False)
     df['acumulado'] = df['faturamento'].cumsum() / df['faturamento'].sum()
     df['classe_abc'] = np.where(df['acumulado'] <= 0.8, 'A', np.where(df['acumulado'] <= 0.95, 'B', 'C'))
     
-    # Margem Bruta Individual
     df['lucro_bruto'] = df['faturamento'] - (df['quantidade'] * df['custo'])
     df['margem_perc'] = df['lucro_bruto'] / df['faturamento'].replace(0, np.nan)
     
     return df
 
+def calcular_dna_empresa():
+    # Calcula o peso percentual do Custo Fixo sobre o Faturamento Esperado
+    fp = st.session_state.fin_params
+    perc_custo_fixo = (fp['custo_fixo_valor'] / fp['faturamento_esperado']) * 100 if fp['faturamento_esperado'] > 0 else 0
+    
+    # Soma todas as deduções (Imposto + Cartão + Custo Fixo %)
+    deducoes_totais = fp['imposto'] + fp['taxa_cartao'] + fp['comissao'] + perc_custo_fixo
+    return deducoes_totais, perc_custo_fixo
+
 def gerar_combos_ia(df, num_sugestoes=5):
-    """Gera combos inteligentes baseados em regras de negócio"""
     if df.empty: return []
     
     df = analisar_dados(df)
@@ -145,8 +155,8 @@ def gerar_combos_ia(df, num_sugestoes=5):
     quebras = df[(df['classe_abc'] == 'C') & (df['margem_perc'] > 0.5)]
     
     sugestoes = []
+    deducoes, perc_cf = calcular_dna_empresa()
     
-    # Estratégias
     estrategias = [
         ("Aumentar Ticket Médio", burros, quebras, 0.10),
         ("Giro de Estoque", estrelas, quebras, 0.15),
@@ -154,12 +164,9 @@ def gerar_combos_ia(df, num_sugestoes=5):
         ("Oferta Irresistível", burros, burros, 0.08),
         ("Experiência Premium", estrelas, estrelas, 0.12)
     ]
-    
-    # Randomiza para gerar "novas ideias"
     random.shuffle(estrategias)
     
     count = 0
-    # Tenta gerar combos iterando pelas estratégias
     while count < num_sugestoes:
         for nome_estrat, df1, df2, desconto_padrao in estrategias:
             if not df1.empty and not df2.empty:
@@ -169,11 +176,15 @@ def gerar_combos_ia(df, num_sugestoes=5):
                     if not df2_filt.empty:
                         p2 = df2_filt.sample(1).iloc[0]
                         
-                        custo_tot = p1['custo'] + p2['custo']
+                        # Precificação Real do Combo
+                        custo_insumos = p1['custo'] + p2['custo']
                         venda_full = p1['preco_venda'] + p2['preco_venda']
                         venda_promo = venda_full * (1 - desconto_padrao)
-                        lucro = venda_promo - custo_tot
-                        margem = (lucro / venda_promo) * 100 if venda_promo > 0 else 0
+                        
+                        # Cálculo de Custos Operacionais do Combo
+                        custo_operacional = venda_promo * (deducoes / 100)
+                        lucro_liq = venda_promo - custo_insumos - custo_operacional
+                        margem_liq = (lucro_liq / venda_promo) * 100 if venda_promo > 0 else 0
                         
                         sugestoes.append({
                             "titulo": f"{nome_estrat}",
@@ -181,8 +192,9 @@ def gerar_combos_ia(df, num_sugestoes=5):
                             "prod2": p2['produto'],
                             "venda_full": venda_full,
                             "venda_promo": venda_promo,
-                            "margem": margem,
-                            "racional": f"Une '{p1['produto']}' (Volume) com '{p2['produto']}' (Margem/Giro).",
+                            "margem_liq": margem_liq,
+                            "lucro_liq": lucro_liq,
+                            "racional": f"Une '{p1['produto']}' (Volume) com '{p2['produto']}' (Giro).",
                             "desconto": desconto_padrao * 100
                         })
                         count += 1
@@ -190,7 +202,7 @@ def gerar_combos_ia(df, num_sugestoes=5):
                 except:
                     continue
             if count >= num_sugestoes: break
-        if count == 0: break # Evita loop infinito se não houver dados
+        if count == 0: break
                 
     return sugestoes
 
@@ -201,17 +213,15 @@ def gerar_combos_ia(df, num_sugestoes=5):
 def main():
     init_session()
     
-    # --- TELA DE LOGIN ---
+    # --- LOGIN ---
     if 'logged_in' not in st.session_state or not st.session_state.logged_in:
         c1, c2, c3 = st.columns([1,1.5,1])
         with c2:
-            st.title("🍞 ProfitOS Login")
+            st.title("🍞 ProfitOS 4.0")
             st.markdown("---")
             with st.form("login_form"):
                 u = st.text_input("Usuário")
                 p = st.text_input("Senha", type="password")
-                # Sem seletor de perfil, define auto
-                
                 if st.form_submit_button("Acessar Sistema"):
                     user_data = authenticate(u, p)
                     if user_data:
@@ -220,284 +230,250 @@ def main():
                         st.session_state.username = u
                         st.rerun()
                     else:
-                        st.error("Usuário ou senha incorretos.")
+                        st.error("Usuário incorreto.")
         return
 
-    # --- USUÁRIO LOGADO ---
+    # --- SIDEBAR E PERSISTÊNCIA ---
     user = st.session_state.user_info
     role = user['role']
-    name = user['name']
     
-    # SIDEBAR
     st.sidebar.title("🍞 Menu ProfitOS")
-    st.sidebar.write(f"Olá, **{name}**")
-    st.sidebar.caption(f"Perfil: {role.upper()}")
+    st.sidebar.write(f"Olá, **{user['name']}**")
     
-    # Definição de Menus por Perfil
-    menu_options = ["Central de Dados", "Precificador", "Dashboard Inteligente", "Combos IA"]
-    if role == "vendedor":
-        menu_options = ["Precificador"]
-    if role == "master":
-        menu_options.append("Gestão de Usuários")
-        
+    menu_options = ["Central de Dados", "Precificador", "Painel Financeiro", "Combos IA"]
+    if role == "vendedor": menu_options = ["Precificador"]
+    if role == "master": menu_options.append("Gestão de Usuários")
+    
     choice = st.sidebar.radio("Navegar", menu_options)
     
     st.sidebar.markdown("---")
+    st.sidebar.subheader("💾 Backup de Dados")
+    st.sidebar.info("Para usar em outro computador, baixe o backup aqui e restaure no destino.")
+    
+    # Botão de Download
+    csv = convert_df_to_csv(st.session_state.data_base)
+    st.sidebar.download_button(
+        label="📥 Baixar Dados Atuais",
+        data=csv,
+        file_name='backup_profitos.csv',
+        mime='text/csv',
+    )
+    
+    # Botão de Restaurar
+    uploaded_backup = st.sidebar.file_uploader("📤 Restaurar Backup", type=['csv'])
+    if uploaded_backup is not None:
+        try:
+            df_restore = pd.read_csv(uploaded_backup)
+            st.session_state.data_base = df_restore
+            st.sidebar.success("Dados restaurados! Atualize a página.")
+        except:
+            st.sidebar.error("Erro ao ler backup.")
+
     if st.sidebar.button("Sair"):
         st.session_state.logged_in = False
         st.rerun()
 
-    # --- 1. GESTÃO DE USUÁRIOS (MASTER) ---
+    # --- FUNCIONALIDADES ---
+    
+    # 1. GESTÃO DE USUÁRIOS
     if choice == "Gestão de Usuários":
         st.title("👥 Gestão de Acessos")
+        users_list = [{"Login": k, "Nome": v['name'], "Perfil": v['role']} for k, v in st.session_state.users_db.items()]
+        st.dataframe(pd.DataFrame(users_list), use_container_width=True)
         
-        tab_list, tab_add = st.tabs(["Lista de Usuários", "Criar Novo Usuário"])
-        
-        with tab_list:
-            users_list = []
-            for u_key, u_val in st.session_state.users_db.items():
-                users_list.append({"Login": u_key, "Nome": u_val['name'], "Perfil": u_val['role']})
-            st.dataframe(pd.DataFrame(users_list), use_container_width=True)
-            
-            st.subheader("Alterar/Remover")
-            c1, c2, c3 = st.columns(3)
-            user_to_edit = c1.selectbox("Selecionar Usuário", list(st.session_state.users_db.keys()))
-            new_pass = c2.text_input("Nova Senha (deixe vazio para manter)", type="password")
-            
-            if c3.button("Atualizar Senha"):
-                if new_pass:
-                    st.session_state.users_db[user_to_edit]['pass'] = new_pass
-                    st.success("Senha atualizada!")
-            
-            if st.button("🗑️ Excluir Usuário", type="primary"):
-                if user_to_edit == st.session_state.username:
-                    st.error("Você não pode excluir a si mesmo.")
-                else:
-                    del st.session_state.users_db[user_to_edit]
-                    st.success(f"Usuário {user_to_edit} removido.")
+        with st.expander("➕ Adicionar Novo Usuário"):
+            with st.form("new_user"):
+                nl = st.text_input("Login")
+                nn = st.text_input("Nome")
+                np = st.text_input("Senha", type="password")
+                nr = st.selectbox("Perfil", ["master", "gerente", "vendedor"])
+                if st.form_submit_button("Criar"):
+                    st.session_state.users_db[nl] = {"pass": np, "role": nr, "name": nn}
+                    st.success("Criado!")
                     st.rerun()
 
-        with tab_add:
-            with st.form("add_user"):
-                new_login = st.text_input("Login")
-                new_name = st.text_input("Nome Completo")
-                new_role = st.selectbox("Perfil", ["master", "gerente", "vendedor"])
-                new_p = st.text_input("Senha Inicial", type="password")
-                
-                if st.form_submit_button("Criar Usuário"):
-                    if new_login in st.session_state.users_db:
-                        st.error("Login já existe.")
-                    elif new_login and new_p:
-                        st.session_state.users_db[new_login] = {
-                            "pass": new_p, "role": new_role, "name": new_name
-                        }
-                        st.success("Usuário criado com sucesso!")
-                    else:
-                        st.error("Preencha todos os campos.")
-
-    # --- 2. CENTRAL DE DADOS ---
+    # 2. CENTRAL DE DADOS
     elif choice == "Central de Dados":
-        st.title("📂 Importação de Dados")
+        st.title("📂 Central de Dados")
+        st.info("Importe seus relatórios ou edite manualmente abaixo.")
         
-        uploaded = st.file_uploader("Upload (XLSX, CSV, PDF)", type=['csv','xlsx','pdf'])
+        uploaded = st.file_uploader("Importar Planilha/PDF", type=['csv','xlsx','pdf'])
         if uploaded:
             df, err = processar_upload(uploaded)
-            if err:
-                st.error(err)
+            if not err:
+                st.session_state.data_base = df
+                st.success(f"{len(df)} itens importados.")
             else:
-                st.success(f"Lido com sucesso: {len(df)} itens.")
-                if st.button("💾 Salvar na Base de Dados"):
-                    st.session_state.data_base = df
-                    st.success("Dados atualizados!")
+                st.error(err)
         
-        st.subheader("Base Atual")
-        st.data_editor(st.session_state.data_base, num_rows="dynamic", use_container_width=True)
+        st.subheader("Editor de Produtos")
+        st.data_editor(st.session_state.data_base, num_rows="dynamic", use_container_width=True, key="data_editor")
 
-    # --- 3. PRECIFICADOR ---
+    # 3. PRECIFICADOR
     elif choice == "Precificador":
-        st.title("🏷️ Precificador Rápido")
+        st.title("🏷️ Precificador Inteligente")
         
+        # Pega parâmetros globais
+        fp = st.session_state.fin_params
+        
+        # Area de Configuração dos Custos Operacionais
+        with st.expander("⚙️ Configurar Taxas e Custos da Empresa (DNA)", expanded=True):
+            c1, c2, c3 = st.columns(3)
+            fp['faturamento_esperado'] = c1.number_input("Faturamento Mensal Médio (R$)", value=fp['faturamento_esperado'])
+            fp['custo_fixo_valor'] = c2.number_input("Total Custos Fixos (Aluguel/Luz/Folha)", value=fp['custo_fixo_valor'])
+            fp['imposto'] = c3.number_input("Imposto (%)", value=fp['imposto'])
+            fp['taxa_cartao'] = c1.number_input("Taxa Máquina Cartão (%)", value=fp['taxa_cartao'])
+        
+        # Cálculos do DNA
+        deducoes_totais, perc_cf = calcular_dna_empresa()
+        st.info(f"🧬 **Custo Operacional Total:** {deducoes_totais:.2f}% do preço de venda (sendo {perc_cf:.1f}% de custo fixo)")
+
+        st.divider()
+
+        # Seleção de Produto
         df = st.session_state.data_base
-        produtos_lista = df['produto'].unique().tolist() if not df.empty else []
-        produtos_lista.insert(0, "Novo Produto (Digitar manual)")
+        prods = ["Novo Produto"] + df['produto'].unique().tolist() if not df.empty else ["Novo Produto"]
+        sel = st.selectbox("Selecione Produto", prods)
         
-        c1, c2 = st.columns(2)
-        with c1:
-            sel_prod = st.selectbox("Selecione um Produto", produtos_lista)
-            
-            custo_base = 0.0
-            if sel_prod != "Novo Produto (Digitar manual)":
-                if not df.empty:
-                    val = df[df['produto'] == sel_prod]['custo'].iloc[0]
-                    custo_base = float(val) if pd.notnull(val) else 0.0
-                st.caption(f"Custo Base importado: R$ {custo_base:.2f}")
-            
-            custo_final = st.number_input("Custo Insumos (R$)", value=custo_base, format="%.2f")
-            embalagem = st.number_input("Custo Embalagem (R$)", 0.0, format="%.2f")
-            cupom = st.number_input("Cupom de Desconto (R$)", 0.0, format="%.2f")
-            
-        with c2:
-            st.markdown("### Definição de Lucro")
-            # Puxa DNA da config global
-            dna_params = st.session_state.fin_params
-            taxas_totais = dna_params['imposto'] + dna_params['taxa_cartao'] + dna_params['comissao']
-            
-            margem_target = st.slider("Margem de Lucro Líquido Desejada (%)", 0, 100, 20)
-            
-            # Cálculo
-            custo_total = custo_final + embalagem
-            divisor = 1 - (taxas_totais/100) - (margem_target/100)
-            
-            st.divider()
+        custo_ini = 0.0
+        if sel != "Novo Produto":
+            custo_ini = float(df[df['produto']==sel]['custo'].iloc[0])
+        
+        col_in, col_res = st.columns(2)
+        with col_in:
+            custo_insumo = st.number_input("Custo Insumos (R$)", value=custo_ini, format="%.2f")
+            custo_emb = st.number_input("Embalagem (R$)", 0.0)
+            margem_desejada = st.slider("Margem Líquida Desejada (%)", 0, 50, 20)
+        
+        with col_res:
+            # FÓRMULA CORRETA DE PRECIFICAÇÃO (MARKUP DIVISOR)
+            # Preço = Custo / (1 - (Taxas + CustoFixo% + MargemLiq))
+            custo_total = custo_insumo + custo_emb
+            divisor = 1 - (deducoes_totais/100) - (margem_desejada/100)
             
             if divisor <= 0:
-                st.error("A soma de Taxas + Margem ultrapassa 100%. Impossível calcular.")
+                st.error("❌ Impossível atingir essa margem com os custos atuais!")
+                st.write("A soma de (Custos Fixos + Impostos + Margem) ultrapassa 100%.")
             else:
-                preco_venda = (custo_total + cupom) / divisor
-                st.metric("Preço de Venda Sugerido", f"R$ {preco_venda:.2f}")
+                preco_sugerido = custo_total / divisor
+                st.metric("Preço de Venda Sugerido", f"R$ {preco_sugerido:.2f}")
+                
+                # Prova real
+                imposto_r = preco_sugerido * (fp['imposto']/100)
+                taxa_r = preco_sugerido * (fp['taxa_cartao']/100)
+                cf_r = preco_sugerido * (perc_cf/100)
+                lucro_r = preco_sugerido - custo_total - imposto_r - taxa_r - cf_r
                 
                 detalhe = {
-                    "Custo Prod+Emb": custo_total,
-                    "Cupom (Cliente ganha)": cupom,
-                    f"Impostos/Taxas ({taxas_totais}%)": preco_venda * (taxas_totais/100),
-                    f"Lucro Líquido ({margem_target}%)": preco_venda * (margem_target/100)
+                    "Custo Mercadoria": custo_total,
+                    "Impostos/Taxas": imposto_r + taxa_r,
+                    "Custo Fixo (Rateio)": cf_r,
+                    "Lucro Líquido Real": lucro_r
                 }
+                st.write(f"Lucro Líquido Real: **R$ {lucro_r:.2f} ({margem_desejada}%)**")
                 st.bar_chart(pd.Series(detalhe))
 
-    # --- 4. DASHBOARD INTELIGENTE ---
-    elif choice == "Dashboard Inteligente":
-        st.title("📊 Painel Financeiro Real")
+    # 4. PAINEL FINANCEIRO
+    elif choice == "Painel Financeiro":
+        st.title("📊 Painel Financeiro")
         
-        # Configuração de Custos
-        with st.expander("⚙️ Configurar Parâmetros de Custo do Mês", expanded=False):
-            c_a, c_b, c_c = st.columns(3)
-            fp = st.session_state.fin_params
-            
-            n_cf = c_a.number_input("Custo Fixo (Aluguel, Luz, Pessoal)", value=fp['custo_fixo'])
-            n_desp = c_b.number_input("Desperdício/Perda (R$)", value=fp['desperdicio'])
-            n_imp = c_c.number_input("Impostos + Taxas Totais (%)", value=fp['imposto'] + fp['taxa_cartao'])
-            
-            if st.button("Salvar Parâmetros"):
-                st.session_state.fin_params.update({
-                    'custo_fixo': n_cf, 'desperdicio': n_desp, 'imposto': n_imp, 'taxa_cartao': 0
-                })
-                st.success("Parâmetros atualizados!")
-                st.rerun()
-
         df = st.session_state.data_base
         if df.empty:
-            st.warning("Sem dados para analisar. Vá em 'Central de Dados' primeiro.")
+            st.warning("Sem dados.")
         else:
             df = analisar_dados(df)
             
-            # CÁLCULO DE LUCRO LÍQUIDO REAL
-            faturamento_total = df['faturamento'].sum()
-            custo_produtos = (df['quantidade'] * df['custo']).sum()
-            lucro_bruto = faturamento_total - custo_produtos
+            # Cálculo Automático
+            fat_auto = df['faturamento'].sum()
+            custo_auto = (df['quantidade'] * df['custo']).sum()
             
-            fp = st.session_state.fin_params
-            # Taxa está somada no campo imposto para simplificar o cálculo
-            impostos_valor = faturamento_total * (fp['imposto'] / 100) 
-            despesas_operacionais = fp['custo_fixo'] + fp['desperdicio']
+            # --- AJUSTE MANUAL DE FATURAMENTO ---
+            st.subheader("Resumo do Mês")
+            col_fat1, col_fat2 = st.columns([1, 2])
             
-            lucro_liquido = lucro_bruto - impostos_valor - despesas_operacionais
-            margem_liq_real = (lucro_liquido / faturamento_total * 100) if faturamento_total > 0 else 0
+            with col_fat1:
+                st.caption("Faturamento Importado (Automático)")
+                st.write(f"R$ {fat_auto:,.2f}")
             
-            # CARDS
+            with col_fat2:
+                # Campo editável que inicia com o valor automático
+                fat_real = st.number_input("Faturamento Real Ajustado (Digite aqui se houver vendas extras)", 
+                                           value=float(fat_auto), format="%.2f")
+            
+            # Recalcula proporcionalmente o CMV se o faturamento mudou (estimativa)
+            fator_ajuste = fat_real / fat_auto if fat_auto > 0 else 1
+            cmv_real = custo_auto * fator_ajuste
+            
+            deducoes, perc_cf = calcular_dna_empresa()
+            
+            # DRE Gerencial
+            impostos_v = fat_real * ((st.session_state.fin_params['imposto'] + st.session_state.fin_params['taxa_cartao']) / 100)
+            custos_fixos_v = st.session_state.fin_params['custo_fixo_valor']
+            desperdicio_v = st.session_state.fin_params['desperdicio']
+            
+            lucro_op = fat_real - cmv_real - impostos_v - custos_fixos_v - desperdicio_v
+            margem_op = (lucro_op / fat_real * 100) if fat_real > 0 else 0
+            
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Faturamento", f"R$ {faturamento_total:,.2f}")
-            k2.metric("CMV (Custo Mercadoria)", f"R$ {custo_produtos:,.2f}", f"-{(custo_produtos/faturamento_total)*100:.1f}% Fat")
-            k3.metric("Custos Fixos + Desperdício", f"R$ {despesas_operacionais:,.2f}", help=f"CF: {fp['custo_fixo']} + Perda: {fp['desperdicio']}")
-            k4.metric("Lucro Líquido Real", f"R$ {lucro_liquido:,.2f}", f"{margem_liq_real:.1f}%", delta_color="normal")
-            
-            st.markdown("---")
-            
-            # Gráficos
-            g1, g2 = st.columns([2,1])
-            with g1:
-                st.subheader("Curva ABC de Vendas")
-                fig = px.bar(df.head(15), x='produto', y='faturamento', color='classe_abc', title="Top 15 Produtos")
-                st.plotly_chart(fig, use_container_width=True)
-            with g2:
-                st.subheader("Para onde vai o dinheiro?")
-                waterfall_data = {
-                    "Faturamento": faturamento_total,
-                    "(-) CMV": -custo_produtos,
-                    "(-) Impostos": -impostos_valor,
-                    "(-) Fixos/Perdas": -despesas_operacionais,
-                    "(=) Lucro Líquido": lucro_liquido
-                }
-                fig_w = go.Figure(go.Waterfall(
-                    measure = ["absolute", "relative", "relative", "relative", "total"],
-                    x = list(waterfall_data.keys()),
-                    y = list(waterfall_data.values()),
-                    connector = {"line":{"color":"rgb(63, 63, 63)"}},
-                ))
-                st.plotly_chart(fig_w, use_container_width=True)
+            k1.metric("Faturamento Real", f"R$ {fat_real:,.2f}")
+            k2.metric("CMV Estimado", f"R$ {cmv_real:,.2f}")
+            k3.metric("Custos Operacionais", f"R$ {custos_fixos_v + impostos_v + desperdicio_v:,.2f}", help="Fixos + Impostos + Perda")
+            k4.metric("Lucro Líquido", f"R$ {lucro_op:,.2f}", f"{margem_op:.1f}%", delta_color="normal")
 
-    # --- 5. COMBOS IA ---
+            # Gráficos
+            g1, g2 = st.columns(2)
+            g1.plotly_chart(px.bar(df.head(10), x='produto', y='faturamento', title="Top 10 Vendas"), use_container_width=True)
+            
+            fig_pie = px.pie(names=["CMV", "Custos Fixos", "Impostos", "Desperdício", "Lucro"], 
+                             values=[cmv_real, custos_fixos_v, impostos_v, desperdicio_v, max(0, lucro_op)], 
+                             title="Distribuição da Receita")
+            g2.plotly_chart(fig_pie, use_container_width=True)
+
+    # 5. COMBOS IA
     elif choice == "Combos IA":
-        st.title("🤖 Fábrica de Combos")
+        st.title("🤖 Combos com Análise de Lucro Real")
         
-        tab_manual, tab_ia = st.tabs(["🛠️ Criar Manualmente", "✨ Sugestões IA"])
-        
+        tab_man, tab_ia = st.tabs(["Manual", "IA"])
         df = st.session_state.data_base
+        deducoes, perc_cf = calcular_dna_empresa()
         
-        with tab_manual:
-            if df.empty:
-                st.warning("Carregue produtos primeiro.")
-            else:
-                st.markdown("Selecione os produtos para montar um kit:")
-                prods = st.multiselect("Produtos do Combo", df['produto'].unique())
-                
+        with tab_man:
+            if not df.empty:
+                prods = st.multiselect("Produtos", df['produto'].unique())
                 if prods:
-                    # Filtra e soma
-                    selecao = df[df['produto'].isin(prods)]
-                    custo_total = selecao['custo'].sum()
-                    venda_soma = selecao['preco_venda'].sum()
+                    sel = df[df['produto'].isin(prods)]
+                    custo_i = sel['custo'].sum()
+                    venda_i = sel['preco_venda'].sum()
                     
                     c1, c2, c3 = st.columns(3)
-                    c1.metric("Preço Tabela (Soma)", f"R$ {venda_soma:.2f}")
-                    # CORREÇÃO AQUI: F-string fechada corretamente
-                    c2.metric("Custo Itens", f"R$ {custo_total:.2f}")
+                    c1.metric("Preço Tabela", f"R$ {venda_i:.2f}")
+                    c2.metric("Custo Insumos", f"R$ {custo_i:.2f}")
                     
-                    preco_promo = c3.number_input("Preço Promocional do Combo", value=float(venda_soma)*0.9)
+                    promo = c3.number_input("Preço Combo", value=venda_i*0.9)
                     
-                    if preco_promo > 0:
-                        lucro = preco_promo - custo_total
-                        margem = (lucro / preco_promo) * 100
-                        
-                        st.info(f"💰 Lucro do Combo: R$ {lucro:.2f}")
-                        if margem < 20:
-                            st.error(f"Margem Baixa: {margem:.1f}%")
-                        elif margem > 40:
-                            st.success(f"Margem Excelente: {margem:.1f}%")
-                        else:
-                            st.warning(f"Margem OK: {margem:.1f}%")
-
+                    # Lucro Líquido Real
+                    custo_op_combo = promo * (deducoes / 100)
+                    lucro_liq = promo - custo_i - custo_op_combo
+                    margem_liq = (lucro_liq / promo * 100) if promo > 0 else 0
+                    
+                    st.write(f"Custo Operacional do Combo (Taxas + Rateio Fixo): R$ {custo_op_combo:.2f}")
+                    
+                    if lucro_liq > 0:
+                        st.success(f"✅ Lucro Líquido: R$ {lucro_liq:.2f} ({margem_liq:.1f}%)")
+                    else:
+                        st.error(f"❌ Prejuízo: R$ {lucro_liq:.2f}")
+        
         with tab_ia:
-            if df.empty:
-                st.info("Necessário base de dados.")
-            else:
-                c_head, c_btn = st.columns([3,1])
-                c_head.write("A IA analisa a Curva ABC e Margens para sugerir 5 combos estratégicos.")
-                
-                # Botão gera novas sugestões
-                if 'sugestoes_ia' not in st.session_state or c_btn.button("🔄 Gerar Novas Ideias"):
-                    st.session_state.sugestoes_ia = gerar_combos_ia(df, 5)
-                
-                sugestoes = st.session_state.sugestoes_ia
-                
-                if not sugestoes:
-                    st.warning("Não encontrei correlações suficientes nos dados atuais (poucos produtos).")
-                else:
+            if not df.empty:
+                if st.button("Gerar Sugestões"):
+                    sugestoes = gerar_combos_ia(df)
                     for s in sugestoes:
-                        with st.expander(f"💡 {s['titulo']}: {s['prod1']} + {s['prod2']}", expanded=True):
-                            col_A, col_B, col_C = st.columns(3)
-                            col_A.metric("De (Separados)", f"R$ {s['venda_full']:.2f}")
-                            col_B.metric(f"Por (Desc {s['desconto']:.0f}%)", f"R$ {s['venda_promo']:.2f}")
-                            col_C.metric("Margem Combo", f"{s['margem']:.1f}%")
-                            st.caption(f"**Racional:** {s['racional']}")
+                        with st.expander(f"{s['titulo']}: {s['prod1']} + {s['prod2']}", expanded=True):
+                            c1, c2, c3 = st.columns(3)
+                            c1.metric("Preço Promo", f"R$ {s['venda_promo']:.2f}")
+                            c2.metric("Lucro Líquido", f"R$ {s['lucro_liq']:.2f}")
+                            c3.metric("Margem Líq", f"{s['margem_liq']:.1f}%")
+                            st.caption(s['racional'])
 
 if __name__ == "__main__":
     main()
